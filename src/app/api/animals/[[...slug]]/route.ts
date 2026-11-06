@@ -33,6 +33,28 @@ function canAccess(ownerId: number, user: { id: string; role: string }) {
   return ownerId === Number(user.id) || user.role === "ADMIN";
 }
 
+function formatAnimalWithIcs(animal: any) {
+  if (!animal) return null;
+  return {
+    ...animal,
+    ics: {
+      status: "IN_DEVELOPMENT",
+      score: null,
+      scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
+      classification: "Em desenvolvimento",
+      message: "Predição de ICS em fase de treinamento e validação neural.",
+    },
+    photos: (animal.photos || []).map((p: any) => ({
+      ...p,
+      ics: {
+        status: "IN_DEVELOPMENT",
+        score: null,
+        classification: "Em desenvolvimento",
+      },
+    })),
+  };
+}
+
 type Context = { params: Promise<{ slug?: string[] }> };
 
 export async function OPTIONS(request: Request) {
@@ -61,7 +83,7 @@ export async function GET(request: Request, context: Context) {
       return corsJsonResponse({ error: "Animal não encontrado" }, 404, request);
     }
 
-    return corsJsonResponse(animal, 200, request);
+    return corsJsonResponse(formatAnimalWithIcs(animal), 200, request);
   }
 
   // 2. GET /api/animals (lista todos do usuário ou busca por tag)
@@ -87,7 +109,7 @@ export async function GET(request: Request, context: Context) {
         return corsJsonResponse({ error: "Animal não encontrado" }, 404, request);
       }
 
-      return corsJsonResponse(animal, 200, request);
+      return corsJsonResponse(formatAnimalWithIcs(animal), 200, request);
     }
 
     const animals = await prisma.animal.findMany({
@@ -98,7 +120,7 @@ export async function GET(request: Request, context: Context) {
       orderBy: { createdAt: "desc" },
     });
 
-    return corsJsonResponse(animals, 200, request);
+    return corsJsonResponse(animals.map(formatAnimalWithIcs), 200, request);
   }
 
   return corsJsonResponse({ error: "Rota não encontrada" }, 404, request);

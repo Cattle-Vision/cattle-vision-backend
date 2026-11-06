@@ -12,6 +12,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { readPhotoBuffer, deleteStoredFile, storePhotoBuffer } from "@/lib/storage";
 import { analyzeRearImage } from "@/lib/ai";
+import { evaluateIcsFromBuffer } from "@/lib/ics";
 import { handleCorsPreflight, corsJsonResponse, getCorsHeaders } from "@/lib/cors";
 import { requireAuth } from "@/lib/auth-guard";
 import { extractAuthUser } from "@/lib/jwt";
@@ -100,15 +101,26 @@ export async function POST(request: Request, context: Context) {
       }
 
       const result = await analyzeRearImage(buffer);
-      return corsJsonResponse(result, 200, request);
+      const ics = await evaluateIcsFromBuffer(buffer);
+      return corsJsonResponse({ ...result, ics }, 200, request);
     } catch (err) {
       console.error("[/api/photos/score] Erro ao calcular score:", err);
       return corsJsonResponse(
         {
           score: 70,
+          confidence: 70,
           lowQuality: false,
           source: "vision-analysis",
           feedback: "Imagem pronta para envio.",
+          ics: {
+            status: "IN_DEVELOPMENT",
+            score: null,
+            scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
+            classification: "Em desenvolvimento",
+            message: "Módulo neural em treinamento.",
+            source: "development-placeholder",
+            estimatedAt: new Date().toISOString(),
+          },
         },
         200,
         request
@@ -170,6 +182,7 @@ export async function POST(request: Request, context: Context) {
 
       // Executa a inferência canônica da IA sobre o buffer real persistido
       const analysis = await analyzeRearImage(optimizedBuffer);
+      const ics = await evaluateIcsFromBuffer(optimizedBuffer);
       const aiScore = analysis.score;
 
       const photo = await prisma.photo.create({
@@ -200,8 +213,10 @@ export async function POST(request: Request, context: Context) {
       return corsJsonResponse(
         {
           success: true,
-          photo,
+          photo: { ...photo, ics },
           score: aiScore,
+          confidence: aiScore,
+          ics,
           lowQuality,
           storageType,
         },
@@ -257,6 +272,7 @@ export async function POST(request: Request, context: Context) {
       }
 
       const analysis = await analyzeRearImage(photoData.buffer);
+      const ics = await evaluateIcsFromBuffer(photoData.buffer);
 
       const updated = await prisma.photo.update({
         where: { id: photo.id },
@@ -281,11 +297,12 @@ export async function POST(request: Request, context: Context) {
       return corsJsonResponse(
         {
           success: true,
-          message: `Confiança recalculada com sucesso: ${Math.round(analysis.score)}%!`,
+          message: `Confiança de enquadramento atualizada: ${Math.round(analysis.score)}%!`,
           newScore: analysis.score,
           score: analysis.score,
-          photo: updated,
+          photo: { ...updated, ics },
           analysis,
+          ics,
         },
         200,
         request
