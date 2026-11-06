@@ -16,6 +16,7 @@ import { evaluateIcsFromBuffer } from "@/lib/ics";
 import { handleCorsPreflight, corsJsonResponse, getCorsHeaders } from "@/lib/cors";
 import { requireAuth } from "@/lib/auth-guard";
 import { extractAuthUser } from "@/lib/jwt";
+import { canAccessAnimal } from "@/lib/custody";
 
 export const maxDuration = 45;
 export const dynamic = "force-dynamic";
@@ -46,12 +47,16 @@ export async function GET(request: Request, context: Context) {
     return corsJsonResponse({ error: "Foto não encontrada" }, 404, request);
   }
 
-  // Se houver usuário autenticado, valida permissão (owner ou admin); caso contrário, permite servir via proxy
+  // Se houver usuário autenticado, valida permissão (owner, admin ou colaborador); caso contrário, permite servir via proxy
   const user = extractAuthUser(request);
   if (user) {
-    const isOwner = photo?.animal?.ownerId === Number(user.id);
-    const isAdmin = user.role === "ADMIN";
-    if (!isOwner && !isAdmin) {
+    const hasAccess = await canAccessAnimal(
+      photo.animalId,
+      photo?.animal?.ownerId ?? 0,
+      Number(user.id),
+      user.role === "ADMIN"
+    );
+    if (!hasAccess) {
       return corsJsonResponse({ error: "Acesso negado a esta foto" }, 403, request);
     }
   }
@@ -162,9 +167,13 @@ export async function POST(request: Request, context: Context) {
         return corsJsonResponse({ error: "Animal não encontrado." }, 404, request);
       }
 
-      const isOwner = animal.ownerId === Number(user.id);
-      const isAdmin = user.role === "ADMIN";
-      if (!isOwner && !isAdmin) {
+      const hasAccess = await canAccessAnimal(
+        animal.id,
+        animal.ownerId,
+        Number(user.id),
+        user.role === "ADMIN"
+      );
+      if (!hasAccess) {
         return corsJsonResponse(
           { error: "Você não tem permissão para adicionar fotos a este animal." },
           403,
@@ -251,10 +260,14 @@ export async function POST(request: Request, context: Context) {
         return corsJsonResponse({ error: "Foto não encontrada" }, 404, request);
       }
 
-      const isOwner = photo.animal?.ownerId === Number(user.id);
-      const isAdmin = user.role === "ADMIN";
+      const hasAccess = await canAccessAnimal(
+        photo.animal?.id || "",
+        photo.animal?.ownerId ?? 0,
+        Number(user.id),
+        user.role === "ADMIN"
+      );
 
-      if (!isOwner && !isAdmin) {
+      if (!hasAccess) {
         return corsJsonResponse(
           { error: "Você não tem permissão para recalcular esta foto" },
           403,
