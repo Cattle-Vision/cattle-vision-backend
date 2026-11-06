@@ -16,7 +16,7 @@ let tableEnsured = false;
 
 /**
  * Cria a tabela de guarda compartilhada de forma idempotente e autônoma,
- * sem depender de comandos manuais de migração do Prisma.
+ * executando cada instrução DDL isoladamente para compatibilidade universal com Neon/pgBouncer.
  */
 export async function ensureCustodyTable(): Promise<void> {
   if (tableEnsured) return;
@@ -30,11 +30,21 @@ export async function ensureCustodyTable(): Promise<void> {
         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT "AnimalCollaborator_animalId_fkey" FOREIGN KEY ("animalId") REFERENCES "Animal"("id") ON DELETE CASCADE ON UPDATE CASCADE,
         CONSTRAINT "AnimalCollaborator_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_userId_key" ON "AnimalCollaborator"("animalId", "userId");
-      CREATE INDEX IF NOT EXISTS "AnimalCollaborator_userId_idx" ON "AnimalCollaborator"("userId");
-      CREATE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_idx" ON "AnimalCollaborator"("animalId");
+      )
     `);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE UNIQUE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_userId_key" ON "AnimalCollaborator"("animalId", "userId")
+    `);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "AnimalCollaborator_userId_idx" ON "AnimalCollaborator"("userId")
+    `);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_idx" ON "AnimalCollaborator"("animalId")
+    `);
+
     tableEnsured = true;
   } catch (err) {
     console.warn("[custody] ensureCustodyTable warning:", err);
@@ -76,11 +86,9 @@ export async function canAccessAnimal(
   if (isAdmin || ownerId === userId) return true;
   await ensureCustodyTable();
   try {
-    const records = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
-      `SELECT "id" FROM "AnimalCollaborator" WHERE "animalId" = $1 AND "userId" = $2 LIMIT 1`,
-      animalId,
-      userId
-    );
+    const records = await prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "AnimalCollaborator" WHERE "animalId" = ${animalId} AND "userId" = ${userId} LIMIT 1
+    `;
     return Boolean(records && records.length > 0);
   } catch {
     return false;
@@ -108,11 +116,10 @@ export async function getAccessibleAnimalIds(userId: number, isAdmin: boolean): 
 
   let sharedIds: string[] = [];
   try {
-    const sharedRecords = (await prisma.$queryRawUnsafe<Array<{ animalId: string }>>(
-      `SELECT "animalId" FROM "AnimalCollaborator" WHERE "userId" = $1`,
-      userId
-    )) || [];
-    sharedIds = sharedRecords.map((r) => r.animalId);
+    const sharedRecords = await prisma.$queryRaw<Array<{ animalId: string }>>`
+      SELECT "animalId" FROM "AnimalCollaborator" WHERE "userId" = ${userId}
+    `;
+    sharedIds = (sharedRecords || []).map((r) => r.animalId);
   } catch {
     sharedIds = [];
   }
@@ -148,14 +155,11 @@ export async function addCollaborator(
 
   try {
     const randomId = `collab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO "AnimalCollaborator" ("id", "animalId", "userId", "role", "createdAt")
-       VALUES ($1, $2, $3, 'COLLABORATOR', NOW())
-       ON CONFLICT ("animalId", "userId") DO NOTHING`,
-      randomId,
-      animalId,
-      userId
-    );
+    await prisma.$executeRaw`
+      INSERT INTO "AnimalCollaborator" ("id", "animalId", "userId", "role", "createdAt")
+      VALUES (${randomId}, ${animalId}, ${userId}, 'COLLABORATOR', NOW())
+      ON CONFLICT ("animalId", "userId") DO NOTHING
+    `;
     return { added: true, message: "Guarda compartilhada ativada com sucesso" };
   } catch (err: any) {
     console.error("[custody] addCollaborator error:", err);
@@ -189,11 +193,9 @@ export async function removeCollaborator(
   }
 
   try {
-    await prisma.$executeRawUnsafe(
-      `DELETE FROM "AnimalCollaborator" WHERE "animalId" = $1 AND "userId" = $2`,
-      animalId,
-      targetUserId
-    );
+    await prisma.$executeRaw`
+      DELETE FROM "AnimalCollaborator" WHERE "animalId" = ${animalId} AND "userId" = ${targetUserId}
+    `;
     return { success: true, message: "Acesso de guarda compartilhada revogado com sucesso" };
   } catch (err: any) {
     return { success: false, message: err?.message || "Erro ao remover colaborador" };
@@ -234,11 +236,11 @@ export async function transferOwnership(
   });
 
   // Remove o novo proprietário da lista de colaboradores (já que agora ele é o dono)
-  await prisma.$executeRawUnsafe(
-    `DELETE FROM "AnimalCollaborator" WHERE "animalId" = $1 AND "userId" = $2`,
-    animalId,
-    newOwnerId
-  ).catch(() => {});
+  try {
+    await prisma.$executeRaw`
+      DELETE FROM "AnimalCollaborator" WHERE "animalId" = ${animalId} AND "userId" = ${newOwnerId}
+    `;
+  } catch {}
 
   // Insere o antigo dono como colaborador na guarda compartilhada para não perder o histórico
   await addCollaborator(animalId, previousOwnerId);
@@ -275,7 +277,7 @@ export async function getCustodyDetails(
   // Busca colaboradores
   let collaborators: AnimalCollaboratorRecord[] = [];
   try {
-    const rawCollaborators = await prisma.$queryRawUnsafe<
+    const rawCollaborators = await prisma.$queryRaw<
       Array<{
         id: string;
         animalId: string;
@@ -285,15 +287,14 @@ export async function getCustodyDetails(
         userName: string;
         userEmail: string;
       }>
-    >(
-      `SELECT c."id", c."animalId", c."userId", c."role", c."createdAt",
-              u."name" as "userName", u."email" as "userEmail"
-       FROM "AnimalCollaborator" c
-       INNER JOIN "User" u ON u."id" = c."userId"
-       WHERE c."animalId" = $1
-       ORDER BY c."createdAt" ASC`,
-      animalId
-    );
+    >`
+      SELECT c."id", c."animalId", c."userId", c."role", c."createdAt",
+             u."name" as "userName", u."email" as "userEmail"
+      FROM "AnimalCollaborator" c
+      INNER JOIN "User" u ON u."id" = c."userId"
+      WHERE c."animalId" = ${animalId}
+      ORDER BY c."createdAt" ASC
+    `;
 
     collaborators = (rawCollaborators || []).map((r) => ({
       id: r.id,
