@@ -1,0 +1,39 @@
+services:
+  backend:
+    build: .
+    container_name: cattle-vision-backend
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      NODE_ENV: production
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      AUTH_SECRET: ${AUTH_SECRET:-cattle-vision-jwt-secret-key-production-2026}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@cattlecapture.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrador CattleVision}
+      DATA_POSTGRES_PRISMA_URL: ${DATA_POSTGRES_PRISMA_URL:-postgresql://postgres:postgres@postgres:5432/cattle_capture?schema=public}
+      DATA_POSTGRES_URL_NON_POOLING: ${DATA_POSTGRES_URL_NON_POOLING:-postgresql://postgres:postgres@postgres:5432/cattle_capture?schema=public}
+      BLOB_READ_WRITE_TOKEN: ${BLOB_READ_WRITE_TOKEN:-}
+      BLOB_STORE_ID: ${BLOB_STORE_ID:-}
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: cattle-vision-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cattle_capture
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

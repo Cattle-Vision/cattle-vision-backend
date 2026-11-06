@@ -1,0 +1,49 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATA_POSTGRES_PRISMA_URL")
+  directUrl = env("DATA_POSTGRES_URL_NON_POOLING")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      String   @default("USER")
+  createdAt DateTime @default(now())
+  animals   Animal[]
+}
+
+model Animal {
+  id        String   @id @default(cuid())
+  tag       String
+  name      String   @default("")
+  breed     String
+  sex       String
+  weight    Float
+  age       Int
+  ownerId   Int
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  photos    Photo[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([ownerId, tag])
+  @@index([ownerId])
+}
+
+model Photo {
+  id        String   @id @default(cuid())
+  animalId  String
+  animal    Animal   @relation(fields: [animalId], references: [id], onDelete: Cascade)
+  filePath  String
+  view      String   @default("REAR")
+  score     Float?
+  createdAt DateTime @default(now())
+
+  @@index([animalId])
+}

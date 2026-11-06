@@ -1,0 +1,30 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Environment variables
+.env
+.env*.local
+
+# Next.js build output
+/.next/
+/out/
+
+# Storage uploads
+/storage/uploads/*
+!/storage/uploads/.gitkeep
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Local database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
