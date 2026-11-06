@@ -7,12 +7,20 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   serverExternalPackages: ["sharp", "onnxruntime-node", "@prisma/client", "bcryptjs"],
   outputFileTracingIncludes: {
-    "/api/**/*": [
+    "/api/photos/[[...slug]]": [
       "./identifier.onnx",
-      "./public/identifier.onnx",
       "./node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime.so.1",
       "./node_modules/onnxruntime-node/bin/napi-v6/linux/x64/onnxruntime_binding.node",
-      "./node_modules/onnxruntime-node/**/*",
+    ],
+    "/api/animals/[[...slug]]": [
+      "./identifier.onnx",
+      "./node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime.so.1",
+      "./node_modules/onnxruntime-node/bin/napi-v6/linux/x64/onnxruntime_binding.node",
+    ],
+    "/api/admin/[[...slug]]": [
+      "./identifier.onnx",
+      "./node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime.so.1",
+      "./node_modules/onnxruntime-node/bin/napi-v6/linux/x64/onnxruntime_binding.node",
     ],
   },
   outputFileTracingExcludes: {

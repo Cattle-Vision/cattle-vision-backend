@@ -207,7 +207,7 @@ export function resolveStoredFile(filePath: string): string | null {
 
   for (const candidate of candidates) {
     try {
-      if (require("fs").existsSync(candidate)) {
+      if (require("fs").existsSync(/*turbopackIgnore: true*/ candidate)) {
         return candidate;
       }
     } catch {

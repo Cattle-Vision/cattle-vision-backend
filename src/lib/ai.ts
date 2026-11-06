@@ -54,9 +54,11 @@ function resolveModelPath(): string | null {
   ];
 
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
+    try {
+      if (fs.existsSync(/*turbopackIgnore: true*/ candidate)) {
+        return candidate;
+      }
+    } catch {}
   }
   return null;
 }
