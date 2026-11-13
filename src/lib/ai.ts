@@ -137,7 +137,51 @@ export function calibrateYoloScore(rawConf: number): number {
   return Math.round(rawConf * 1000) / 10;
 }
 
-function buildFeedback(score: number): string {
+function buildFeedback(
+  score: number,
+  box?: { cx: number; cy: number; w: number; h: number }
+): string {
+  // Quando há bounding box válida de inferência neural, fornecemos orientação geométrica específica
+  // além da confiança bruta, evitando diagnósticos genéricos quando a garupa está descentrada ou cortada.
+  if (box && score >= 15) {
+    const leftEdge = box.cx - box.w / 2;
+    const rightEdge = box.cx + box.w / 2;
+    const topEdge = box.cy - box.h / 2;
+    const bottomEdge = box.cy + box.h / 2;
+    const touchesEdge =
+      leftEdge < 0.015 || rightEdge > 0.985 || topEdge < 0.015 || bottomEdge > 0.985;
+
+    if (score >= 70) {
+      if (touchesEdge && (box.w > 0.85 || box.h > 0.85)) {
+        return "Traseira detectada, mas próxima das bordas. Recue ligeiramente para preservar a anatomia.";
+      }
+      return "Enquadramento excelente! Traseira e garupa bovina identificadas com alta precisão pelo modelo.";
+    }
+
+    if (score >= 40) {
+      if (box.cx < 0.3) {
+        return "Traseira reconhecida à esquerda — centralize o animal na mira.";
+      }
+      if (box.cx > 0.7) {
+        return "Traseira reconhecida à direita — centralize o animal na mira.";
+      }
+      if (touchesEdge && (box.w > 0.85 || box.h > 0.85)) {
+        return "Traseira parcialmente nas bordas — recue meio passo para melhorar o foco.";
+      }
+      if (Math.max(box.w, box.h) < 0.24) {
+        return "Traseira reconhecida ao fundo — aproxime para 1m a 1,5m.";
+      }
+      return "Enquadramento aceitável. Traseira bovina reconhecida pelo modelo.";
+    }
+
+    if (box.cx < 0.28 || box.cx > 0.72) {
+      return "Animal fora do centro — alinhe a garupa no centro da mira.";
+    }
+    if (Math.max(box.w, box.h) < 0.22) {
+      return "Traseira muito distante — aproxime (1m a 1,5m) para enquadrar a garupa.";
+    }
+  }
+
   if (score >= 70) {
     return "Enquadramento excelente! Traseira e garupa bovina identificadas com alta precisão pelo modelo.";
   }
@@ -215,13 +259,132 @@ async function fallbackVisionScore(imageBuffer: Buffer): Promise<RearDetectionRe
   }
 }
 
+/** Dimensão mínima (em pixels 640x640) para aceitar uma âncora como candidata real e evitar ruído de fundo */
+const MIN_BOX_DIM_PX = 20;
+
+interface NormalizedRgbImage {
+  data: Buffer;
+  width: number;
+  height: number;
+}
+
+/**
+ * Executa uma passada YOLOv8 ONNX com Letterbox 640x640 sobre um buffer RGB já auto-orientado.
+ * Receber `raw` já rotacionado é crítico porque `sharp(buf).rotate().metadata()` reporta as dimensões
+ * pré-rotação (EXIF Orientation >= 5 invertendo largura/altura), o que corromperia `padX`, `padY` e `box`.
+ */
+async function runYoloOnNormalizedRgb(
+  sess: any,
+  ort: any,
+  rgb: NormalizedRgbImage
+): Promise<{
+  score: number;
+  rawConfidence: number;
+  box: { cx: number; cy: number; w: number; h: number };
+}> {
+  const origW = rgb.width;
+  const origH = rgb.height;
+
+  // Cálculo exato das dimensões de Letterbox mantendo aspecto; Math.floor em padX/padY alinha ao embed do libvips/Sharp
+  const scale = Math.min(TARGET_INFERENCE_SIZE / origW, TARGET_INFERENCE_SIZE / origH);
+  const scaledW = Math.round(origW * scale);
+  const scaledH = Math.round(origH * scale);
+  const padX = Math.floor((TARGET_INFERENCE_SIZE - scaledW) / 2);
+  const padY = Math.floor((TARGET_INFERENCE_SIZE - scaledH) / 2);
+
+  const { data } = await sharp(rgb.data, {
+    raw: { width: origW, height: origH, channels: 3 },
+  })
+    .resize(TARGET_INFERENCE_SIZE, TARGET_INFERENCE_SIZE, {
+      fit: "contain",
+      background: { r: 114, g: 114, b: 114 },
+    })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const totalPixels = TARGET_INFERENCE_SIZE * TARGET_INFERENCE_SIZE;
+  const float32Data = new Float32Array(totalPixels * 3);
+
+  // Normalização CHW [1, 3, 640, 640] em passada única sobre `data` para melhor localidade de cache
+  const inv255 = 1 / 255.0;
+  const planeG = totalPixels;
+  const planeB = totalPixels * 2;
+  for (let i = 0; i < totalPixels; i++) {
+    const base = i * 3;
+    float32Data[i] = data[base] * inv255;
+    float32Data[planeG + i] = data[base + 1] * inv255;
+    float32Data[planeB + i] = data[base + 2] * inv255;
+  }
+
+  const inputTensor = new ort.Tensor("float32", float32Data, [
+    1,
+    3,
+    TARGET_INFERENCE_SIZE,
+    TARGET_INFERENCE_SIZE,
+  ]);
+  const inputName = sess.inputNames?.[0] || "images";
+  const results = await sess.run({ [inputName]: inputTensor });
+
+  const outputName = sess.outputNames?.[0] || Object.keys(results)[0];
+  const outputTensor = results[outputName];
+  const outputData = outputTensor.data as Float32Array;
+
+  // Saída YOLOv8 para 1 classe: shape [1, 5, numAnchors] (onde 5 = cx, cy, w, h, class_score)
+  const numAnchors = outputTensor.dims?.[2] || Math.floor(outputData.length / 5);
+
+  let maxConf = 0;
+  let bestIdx = -1;
+
+  for (let i = 0; i < numAnchors; i++) {
+    const score = outputData[4 * numAnchors + i];
+    if (score <= maxConf) continue;
+
+    const w = outputData[2 * numAnchors + i];
+    const h = outputData[3 * numAnchors + i];
+    if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
+    if (w < MIN_BOX_DIM_PX || h < MIN_BOX_DIM_PX) continue;
+
+    maxConf = score;
+    bestIdx = i;
+  }
+
+  if (bestIdx === -1) {
+    return {
+      score: 0,
+      rawConfidence: 0,
+      box: { cx: 0.5, cy: 0.5, w: 0, h: 0 },
+    };
+  }
+
+  const calibratedScore = calibrateYoloScore(maxConf);
+
+  // Coordenadas brutas na imagem letterbox de 640x640
+  const rawCx = outputData[0 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
+  const rawCy = outputData[1 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
+  const rawW = outputData[2 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
+  const rawH = outputData[3 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
+
+  // Mapeamento inverso das coordenadas para a imagem original (descontando o padding letterbox)
+  const normCx = Math.max(0, Math.min(1, (rawCx - padX) / Math.max(1, scaledW)));
+  const normCy = Math.max(0, Math.min(1, (rawCy - padY) / Math.max(1, scaledH)));
+  const normW = Math.max(0, Math.min(1, rawW / Math.max(1, scaledW)));
+  const normH = Math.max(0, Math.min(1, rawH / Math.max(1, scaledH)));
+
+  return {
+    score: calibratedScore,
+    rawConfidence: maxConf,
+    box: { cx: normCx, cy: normCy, w: normW, h: normH },
+  };
+}
+
 /**
  * Analisa uma imagem completa de traseira bovina usando YOLOv8 ONNX com Letterbox 640x640.
  *
  * Garante:
- * 1. Resolução 640x640 exata conforme treinado no YOLOv8.
- * 2. Aspect Ratio 100% preservado (sem distorcer nem cortar partes da vaca).
- * 3. Bounding box remapeada para a proporção original da imagem [0, 1].
+ * 1. Auto-orientação EXIF materializada ANTES de ler largura/altura, corrigindo fotos verticais de celular.
+ * 2. Resolução 640x640 exata conforme treinado no YOLOv8 (sem distorcer nem cortar).
+ * 3. Segunda passada opcional no recorte central de 68% quando a foto estiver muito aberta (confiança < 45%),
+ *    remapeando a bounding box para a imagem inteira.
  */
 export async function analyzeRearImage(imageBuffer: Buffer): Promise<RearDetectionResult> {
   const loaded = await initModel();
@@ -232,93 +395,66 @@ export async function analyzeRearImage(imageBuffer: Buffer): Promise<RearDetecti
   const { session: sess, ort } = loaded;
 
   try {
-    const sharpInstance = sharp(imageBuffer).rotate();
-    const meta = await sharpInstance.metadata();
-
-    const origW = meta.width && meta.width > 0 ? meta.width : TARGET_INFERENCE_SIZE;
-    const origH = meta.height && meta.height > 0 ? meta.height : TARGET_INFERENCE_SIZE;
-
-    // Cálculo exato das dimensões de Letterbox mantendo aspecto
-    const scale = Math.min(TARGET_INFERENCE_SIZE / origW, TARGET_INFERENCE_SIZE / origH);
-    const scaledW = Math.round(origW * scale);
-    const scaledH = Math.round(origH * scale);
-    const padX = (TARGET_INFERENCE_SIZE - scaledW) / 2;
-    const padY = (TARGET_INFERENCE_SIZE - scaledH) / 2;
-
-    // Redimensionamento Letterbox com fundo cinza neutro YOLO (114, 114, 114)
-    const { data } = await sharpInstance
-      .resize(TARGET_INFERENCE_SIZE, TARGET_INFERENCE_SIZE, {
-        fit: "contain",
-        background: { r: 114, g: 114, b: 114 },
-      })
+    // Materializa o buffer já rotacionado via EXIF e em sRGB 3 canais para que width/height reflitam os pixels reais
+    const normalized = await sharp(imageBuffer)
+      .rotate()
       .removeAlpha()
       .toColorspace("srgb")
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    const totalPixels = TARGET_INFERENCE_SIZE * TARGET_INFERENCE_SIZE;
-    const float32Data = new Float32Array(totalPixels * 3);
+    const origW = normalized.info.width;
+    const origH = normalized.info.height;
+    const baseRgb: NormalizedRgbImage = {
+      data: normalized.data,
+      width: origW,
+      height: origH,
+    };
 
-    // Normalização CHW [1, 3, 640, 640] em passada única sobre `data` para melhor localidade de cache
-    const inv255 = 1 / 255.0;
-    const planeG = totalPixels;
-    const planeB = totalPixels * 2;
-    for (let i = 0; i < totalPixels; i++) {
-      const base = i * 3;
-      float32Data[i] = data[base] * inv255;
-      float32Data[planeG + i] = data[base + 1] * inv255;
-      float32Data[planeB + i] = data[base + 2] * inv255;
-    }
+    let best = await runYoloOnNormalizedRgb(sess, ort, baseRgb);
 
-    const inputTensor = new ort.Tensor("float32", float32Data, [
-      1,
-      3,
-      TARGET_INFERENCE_SIZE,
-      TARGET_INFERENCE_SIZE,
-    ]);
-    const inputName = sess.inputNames?.[0] || "images";
-    const feeds = { [inputName]: inputTensor };
-    const results = await sess.run(feeds);
+    // Quando o operador fotografa de longe ou em grande angular (16:9), a garupa fica reduzida no tensor 640x640.
+    // Avaliamos o miolo central (68%) com mais densidade de pixels e só adotamos se superar a passada completa.
+    if (best.score < 45 && origW >= 400 && origH >= 400) {
+      const cropW = Math.round(origW * 0.68);
+      const cropH = Math.round(origH * 0.68);
+      const cropLeft = Math.floor((origW - cropW) / 2);
+      const cropTop = Math.floor((origH - cropH) / 2);
 
-    const outputName = sess.outputNames?.[0] || Object.keys(results)[0];
-    const outputTensor = results[outputName];
-    const outputData = outputTensor.data as Float32Array;
+      const cropped = await sharp(normalized.data, {
+        raw: { width: origW, height: origH, channels: 3 },
+      })
+        .extract({ left: cropLeft, top: cropTop, width: cropW, height: cropH })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
 
-    // Saída YOLOv8 para 1 classe: shape [1, 5, numAnchors] (onde 5 = cx, cy, w, h, class_score)
-    const numAnchors = outputTensor.dims?.[2] || Math.floor(outputData.length / 5);
+      const cropBest = await runYoloOnNormalizedRgb(sess, ort, {
+        data: cropped.data,
+        width: cropped.info.width,
+        height: cropped.info.height,
+      });
 
-    let maxConf = 0;
-    let bestIdx = 0;
-
-    for (let i = 0; i < numAnchors; i++) {
-      const score = outputData[4 * numAnchors + i];
-      if (score > maxConf) {
-        maxConf = score;
-        bestIdx = i;
+      if (cropBest.rawConfidence > best.rawConfidence && cropBest.box.w > 0 && cropBest.box.h > 0) {
+        best = {
+          score: cropBest.score,
+          rawConfidence: cropBest.rawConfidence,
+          box: {
+            cx: Math.max(0, Math.min(1, (cropLeft + cropBest.box.cx * cropW) / origW)),
+            cy: Math.max(0, Math.min(1, (cropTop + cropBest.box.cy * cropH) / origH)),
+            w: Math.max(0, Math.min(1, (cropBest.box.w * cropW) / origW)),
+            h: Math.max(0, Math.min(1, (cropBest.box.h * cropH) / origH)),
+          },
+        };
       }
     }
 
-    const calibratedScore = calibrateYoloScore(maxConf);
-
-    // Coordenadas brutas na imagem letterbox de 640x640
-    const rawCx = outputData[0 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
-    const rawCy = outputData[1 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
-    const rawW = outputData[2 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
-    const rawH = outputData[3 * numAnchors + bestIdx] ?? TARGET_INFERENCE_SIZE / 2;
-
-    // Mapeamento inverso das coordenadas para a imagem original (descontando o padding letterbox)
-    const normCx = Math.max(0, Math.min(1, (rawCx - padX) / scaledW));
-    const normCy = Math.max(0, Math.min(1, (rawCy - padY) / scaledH));
-    const normW = Math.max(0, Math.min(1, rawW / scaledW));
-    const normH = Math.max(0, Math.min(1, rawH / scaledH));
-
     return {
-      score: calibratedScore,
-      rawConfidence: maxConf,
-      lowQuality: calibratedScore < 40.0,
+      score: best.score,
+      rawConfidence: best.rawConfidence,
+      lowQuality: best.score < 40.0,
       source: "yolo-onnx",
-      box: { cx: normCx, cy: normCy, w: normW, h: normH },
-      feedback: buildFeedback(calibratedScore),
+      box: best.box,
+      feedback: buildFeedback(best.score, best.box),
     };
   } catch (err) {
     console.error("[AI] Erro na inferência ONNX, usando fallback óptico dinâmico:", err);
