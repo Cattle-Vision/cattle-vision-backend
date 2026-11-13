@@ -1,7 +1,6 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
-import { runWithConcurrency } from "../../common/utils/async.utils";
 import { AiVisionService, RearDetectionResult } from "./ai-vision.service";
 import { IcsEvaluationResult, IcsService } from "./ics.service";
 import { StorageService } from "./storage.service";
@@ -127,8 +126,8 @@ export class PhotoRecalibrationService {
     const affectedAnimalIds = new Set<string>();
     const results: RecalibratedBatchItem[] = [];
 
-    // Concorrência limitada a 2 para equilibrar velocidade e memória das 3 sessões ONNX
-    await runWithConcurrency(photos, 2, async (photo) => {
+    // Processamento estritamente sequencial (1 foto por vez) para evitar travamentos ONNX/CPU e garantir paridade absoluta
+    for (const photo of photos) {
       try {
         const { analysis } = await this.recalibratePhotoRecord(photo);
         affectedAnimalIds.add(photo.animalId);
@@ -142,7 +141,7 @@ export class PhotoRecalibrationService {
       } catch (err) {
         console.warn(`[recalibrate] Erro ao recalcular foto ${photo.id}:`, err);
       }
-    });
+    }
 
     if (affectedAnimalIds.size > 0) {
       await this.prisma.animal

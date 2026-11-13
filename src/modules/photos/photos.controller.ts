@@ -105,13 +105,15 @@ export class PhotosController {
   uploadPhoto(
     @CurrentUser() user: TokenPayload,
     @UploadedFile() file: Express.Multer.File | undefined,
-    @Body() body: { animalId?: string; view?: string }
+    @Body() body: { animalId?: string; view?: string; preScore?: string; aiSource?: string }
   ) {
     return this.photosService.uploadPhoto({
       user,
       file,
       animalId: body?.animalId,
       view: body?.view,
+      preScore: body?.preScore,
+      aiSource: body?.aiSource,
     });
   }
 
@@ -122,13 +124,15 @@ export class PhotosController {
   uploadPhotoAlias(
     @CurrentUser() user: TokenPayload,
     @UploadedFile() file: Express.Multer.File | undefined,
-    @Body() body: { animalId?: string; view?: string }
+    @Body() body: { animalId?: string; view?: string; preScore?: string; aiSource?: string }
   ) {
     return this.photosService.uploadPhoto({
       user,
       file,
       animalId: body?.animalId,
       view: body?.view,
+      preScore: body?.preScore,
+      aiSource: body?.aiSource,
     });
   }
 

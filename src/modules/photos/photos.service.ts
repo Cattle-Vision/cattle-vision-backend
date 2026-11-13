@@ -140,6 +140,8 @@ export class PhotosService {
     file?: Express.Multer.File;
     animalId?: string;
     view?: string;
+    preScore?: string;
+    aiSource?: string;
   }) {
     const { user, file } = params;
     const animalId = String(params.animalId ?? "").trim();
@@ -175,9 +177,21 @@ export class PhotosService {
       file.buffer
     );
 
-    const analysis = await this.aiVision.analyzeRearImage(optimizedBuffer);
+    // Edge AI: quando o dispositivo do operador ja calculou o enquadramento com
+    // os modelos ONNX locais (inclusive offline antes do sync), preservamos o
+    // score validado no cliente sem duplicar inferencia de enquadramento no servidor.
+    // Apenas a futura analise de ICS permanece exclusivamente no backend.
+    const parsedClientScore =
+      params.aiSource === "yolo-onnx-client" && params.preScore !== undefined
+        ? Number(params.preScore)
+        : NaN;
+    const hasValidatedClientScore =
+      Number.isFinite(parsedClientScore) && parsedClientScore >= 0 && parsedClientScore <= 100;
+
+    const aiScore = hasValidatedClientScore
+      ? Math.round(parsedClientScore * 10) / 10
+      : (await this.aiVision.analyzeRearImage(optimizedBuffer)).score;
     const ics = await this.icsService.evaluateIcsFromBuffer(optimizedBuffer);
-    const aiScore = analysis.score;
 
     const photo = await this.prisma.photo.create({
       data: {

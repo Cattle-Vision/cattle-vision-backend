@@ -110,6 +110,17 @@ export class AiVisionService {
   private sessionLoadAttempted = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private modelInitPromise: Promise<{ session: any; ort: any } | null> | null = null;
+  /** Fila mutex para garantir inferência ONNX estritamente sequencial (1 imagem por vez). */
+  private inferenceQueue: Promise<void> = Promise.resolve();
+
+  private enqueueInference<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.inferenceQueue.then(task, task);
+    this.inferenceQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
 
   private resolveModelFile(filename: string): string | null {
     const candidates = [
@@ -726,36 +737,34 @@ export class AiVisionService {
     imageBuffer: Buffer,
     options?: AnalyzeRearOptions
   ): Promise<RearDetectionResult> {
-    const loaded = await this.initModel();
-    if (!loaded) {
-      return this.fallbackVisionScore(imageBuffer);
-    }
+    return this.enqueueInference(async () => {
+      const loaded = await this.initModel();
+      if (!loaded) {
+        return this.fallbackVisionScore(imageBuffer);
+      }
 
-    const { session: sess, ort } = loaded;
+      const { session: sess, ort } = loaded;
 
-    try {
-      const normalized = await sharp(imageBuffer)
-        .rotate()
-        .removeAlpha()
-        .toColorspace("srgb")
-        .raw()
-        .toBuffer({ resolveWithObject: true });
+      try {
+        const normalized = await sharp(imageBuffer)
+          .rotate()
+          .removeAlpha()
+          .toColorspace("srgb")
+          .raw()
+          .toBuffer({ resolveWithObject: true });
 
-      const origW = normalized.info.width;
-      const origH = normalized.info.height;
-      const baseRgb: NormalizedRgbImage = {
-        data: normalized.data,
-        width: origW,
-        height: origH,
-      };
+        const origW = normalized.info.width;
+        const origH = normalized.info.height;
+        const baseRgb: NormalizedRgbImage = {
+          data: normalized.data,
+          width: origW,
+          height: origH,
+        };
 
-      const signalsPromise = Promise.all([
-        this.runFaceGuard(ort, baseRgb),
-        this.runCocoGuard(ort, baseRgb),
-      ]);
-
-      let best = await this.runYoloOnNormalizedRgb(sess, ort, baseRgb);
-      const [faceSignals, cocoSignals] = await signalsPromise;
+        // Executa cada modelo ONNX sequencialmente para evitar contenção de threads nativas C++
+        let best = await this.runYoloOnNormalizedRgb(sess, ort, baseRgb);
+        const faceSignals = await this.runFaceGuard(ort, baseRgb);
+        const cocoSignals = await this.runCocoGuard(ort, baseRgb);
 
       // Recorte central apenas quando fora do preview ao vivo e sem rejeição semântica óbvia
       const preliminaryGuard = this.classifySemanticSignals(
@@ -827,9 +836,10 @@ export class AiVisionService {
         box: best.box,
         feedback: this.buildFeedback(best.score, best.box),
       };
-    } catch (err) {
-      console.error("[AI] Erro na inferência ONNX, usando fallback óptico dinâmico:", err);
-      return this.fallbackVisionScore(imageBuffer);
-    }
+      } catch (err) {
+        console.error("[AI] Erro na inferência ONNX, usando fallback óptico dinâmico:", err);
+        return this.fallbackVisionScore(imageBuffer);
+      }
+    });
   }
 }
