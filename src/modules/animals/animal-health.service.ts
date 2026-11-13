@@ -6,6 +6,7 @@ import {
 } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { TokenPayload } from "../auth/jwt.utils";
+import { parseOptionalCoordinate } from "../../common/utils/animal.utils";
 import { CustodyService } from "./custody.service";
 
 const VALID_DISEASE_STATUSES = new Set(["ACTIVE", "MONITORING", "RECOVERED"]);
@@ -240,13 +241,65 @@ export class AnimalHealthService {
     return { ok: true, message: "Registro de doença excluído." };
   }
 
-  /* ── Localizações ── */
+  /* ── Localizações (Fazenda / GPS / Endereço) ── */
   async listLocations(animalId: string, user: TokenPayload) {
     await this.assertAnimalAccess(animalId, user);
     return this.prisma.animalLocationLog.findMany({
       where: { animalId },
       orderBy: { movedAt: "desc" },
     });
+  }
+
+  async createLocation(
+    animalId: string,
+    user: TokenPayload,
+    body: {
+      location?: unknown;
+      address?: unknown;
+      latitude?: unknown;
+      longitude?: unknown;
+      reason?: unknown;
+    }
+  ) {
+    await this.assertAnimalAccess(animalId, user);
+    const location = String(body.location ?? "").trim();
+    const address = String(body.address ?? "").trim();
+    const latitude = parseOptionalCoordinate(body.latitude, -90, 90, "Latitude GPS");
+    const longitude = parseOptionalCoordinate(body.longitude, -180, 180, "Longitude GPS");
+    const reason = String(body.reason ?? "").trim() || "Movimentação entre fazendas/propriedades";
+
+    if (!location && !address && (latitude === null || longitude === null)) {
+      throw new BadRequestException(
+        "Informe o nome da fazenda, o endereço ou as coordenadas GPS."
+      );
+    }
+
+    const effectiveLocation = location || address || "Localização registrada via GPS";
+
+    const [log] = await this.prisma.$transaction([
+      this.prisma.animalLocationLog.create({
+        data: {
+          animalId,
+          location: effectiveLocation,
+          address,
+          latitude,
+          longitude,
+          reason,
+          movedById: Number(user.id) || null,
+        },
+      }),
+      this.prisma.animal.update({
+        where: { id: animalId },
+        data: {
+          location: effectiveLocation,
+          locationAddress: address,
+          latitude,
+          longitude,
+        },
+      }),
+    ]);
+
+    return log;
   }
 
   /* ── Observações Gerais (`AnimalObservation`) ── */

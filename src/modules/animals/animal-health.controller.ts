@@ -90,6 +90,16 @@ export class AnimalHealthController {
     return this.healthService.listLocations(animalId, user);
   }
 
+  @Post("locations")
+  @HttpCode(HttpStatus.CREATED)
+  createLocation(
+    @Param("id") animalId: string,
+    @CurrentUser() user: TokenPayload,
+    @Body() body: Record<string, unknown>
+  ) {
+    return this.healthService.createLocation(animalId, user, body);
+  }
+
   /* ── Tabela de Observações Gerais (`AnimalObservation`) ── */
   @Get("observations")
   listObservations(

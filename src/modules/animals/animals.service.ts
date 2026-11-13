@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
-import { isValidTag, normalizeTag } from "../../common/utils/animal.utils";
+import { isValidTag, normalizeTag, parseOptionalCoordinate } from "../../common/utils/animal.utils";
 import type { TokenPayload } from "../auth/jwt.utils";
 import { AiVisionService } from "../vision/ai-vision.service";
 import { IcsEvaluationResult, IcsService, getIcsClassification } from "../vision/ics.service";
@@ -246,6 +246,9 @@ export class AnimalsService {
       age?: unknown;
       length?: unknown;
       location?: unknown;
+      locationAddress?: unknown;
+      latitude?: unknown;
+      longitude?: unknown;
       observations?: unknown;
       observationCategory?: unknown;
       observationTitle?: unknown;
@@ -259,6 +262,9 @@ export class AnimalsService {
     const weight = Number(body.weight);
     const age = Number(body.age);
     const location = body.location ? String(body.location).trim() : "";
+    const locationAddress = body.locationAddress ? String(body.locationAddress).trim() : "";
+    const latitude = parseOptionalCoordinate(body.latitude, -90, 90, "Latitude GPS");
+    const longitude = parseOptionalCoordinate(body.longitude, -180, 180, "Longitude GPS");
     const observations = body.observations ? String(body.observations).trim() : "";
 
     let length: number | null = null;
@@ -306,17 +312,23 @@ export class AnimalsService {
         age,
         length,
         location,
+        locationAddress,
+        latitude,
+        longitude,
         observations,
         ownerId: userId,
       },
     });
 
-    if (location) {
+    if (location || locationAddress || (latitude !== null && longitude !== null)) {
       await this.prisma.animalLocationLog
         .create({
           data: {
             animalId: animal.id,
-            location,
+            location: location || locationAddress || "Fazenda registrada via GPS",
+            address: locationAddress,
+            latitude,
+            longitude,
             reason: "Localização inicial no cadastro",
             movedById: userId,
           },
@@ -359,6 +371,9 @@ export class AnimalsService {
       age?: unknown;
       length?: unknown;
       location?: unknown;
+      locationAddress?: unknown;
+      latitude?: unknown;
+      longitude?: unknown;
       locationReason?: unknown;
       observations?: unknown;
     }
@@ -390,6 +405,9 @@ export class AnimalsService {
       age?: number;
       length?: number | null;
       location?: string;
+      locationAddress?: string;
+      latitude?: number | null;
+      longitude?: number | null;
       observations?: string;
     } = {};
 
@@ -447,6 +465,15 @@ export class AnimalsService {
     if (body.location !== undefined) {
       updateData.location = String(body.location ?? "").trim();
     }
+    if (body.locationAddress !== undefined) {
+      updateData.locationAddress = String(body.locationAddress ?? "").trim();
+    }
+    if (body.latitude !== undefined) {
+      updateData.latitude = parseOptionalCoordinate(body.latitude, -90, 90, "Latitude GPS");
+    }
+    if (body.longitude !== undefined) {
+      updateData.longitude = parseOptionalCoordinate(body.longitude, -180, 180, "Longitude GPS");
+    }
     if (body.observations !== undefined) {
       updateData.observations = String(body.observations ?? "").trim();
     }
@@ -463,19 +490,34 @@ export class AnimalsService {
       },
     });
 
+    const locationChanged =
+      (updateData.location !== undefined && updateData.location !== animal.location) ||
+      (updateData.locationAddress !== undefined &&
+        updateData.locationAddress !== animal.locationAddress) ||
+      (updateData.latitude !== undefined && updateData.latitude !== animal.latitude) ||
+      (updateData.longitude !== undefined && updateData.longitude !== animal.longitude);
+
+    const effectiveLocation = updateData.location ?? animal.location;
+    const effectiveAddress = updateData.locationAddress ?? animal.locationAddress;
+    const effectiveLat = updateData.latitude !== undefined ? updateData.latitude : animal.latitude;
+    const effectiveLng =
+      updateData.longitude !== undefined ? updateData.longitude : animal.longitude;
+
     if (
-      updateData.location !== undefined &&
-      updateData.location !== "" &&
-      updateData.location !== animal.location
+      locationChanged &&
+      (effectiveLocation || effectiveAddress || (effectiveLat !== null && effectiveLng !== null))
     ) {
       const log = await this.prisma.animalLocationLog
         .create({
           data: {
             animalId,
-            location: updateData.location,
+            location: effectiveLocation || effectiveAddress || "Localização GPS atualizada",
+            address: effectiveAddress,
+            latitude: effectiveLat,
+            longitude: effectiveLng,
             reason: body.locationReason
               ? String(body.locationReason).trim()
-              : "Atualização de localização",
+              : "Atualização de fazenda/localização",
             movedById: userId,
           },
         })

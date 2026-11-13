@@ -1,0 +1,11 @@
+-- AlterTable (additive & non-destructive)
+ALTER TABLE "Animal"
+ADD COLUMN IF NOT EXISTS "locationAddress" TEXT NOT NULL DEFAULT '',
+ADD COLUMN IF NOT EXISTS "latitude" DOUBLE PRECISION,
+ADD COLUMN IF NOT EXISTS "longitude" DOUBLE PRECISION;
+
+-- AlterTable (additive & non-destructive)
+ALTER TABLE "AnimalLocationLog"
+ADD COLUMN IF NOT EXISTS "address" TEXT NOT NULL DEFAULT '',
+ADD COLUMN IF NOT EXISTS "latitude" DOUBLE PRECISION,
+ADD COLUMN IF NOT EXISTS "longitude" DOUBLE PRECISION;

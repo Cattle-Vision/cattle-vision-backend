@@ -29,8 +29,14 @@ model Animal {
   age                Int
   /// Comprimento / tamanho corporal em centímetros (RF07)
   length             Float?
-  /// Localização atual do animal no manejo (pasto, piquete, retiro ou curral) (RF08)
+  /// Localização / Fazenda ou setor atual do animal no manejo (RF08)
   location           String               @default("")
+  /// Endereço completo, município/UF ou referência da fazenda (RF08)
+  locationAddress    String               @default("")
+  /// Latitude GPS (WGS84) da fazenda/propriedade onde o animal está alocado (RF08)
+  latitude           Float?
+  /// Longitude GPS (WGS84) da fazenda/propriedade onde o animal está alocado (RF08)
+  longitude          Float?
   /// Resumo rápido / nota fixada de manejo (complementado pela tabela AnimalObservation) (RF08)
   observations       String               @default("")
   ownerId            Int
@@ -125,6 +131,9 @@ model AnimalLocationLog {
   animalId  String
   animal    Animal   @relation(fields: [animalId], references: [id], onDelete: Cascade)
   location  String
+  address   String   @default("")
+  latitude  Float?
+  longitude Float?
   reason    String   @default("")
   movedAt   DateTime @default(now())
   movedById Int?
