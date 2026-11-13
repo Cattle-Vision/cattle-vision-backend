@@ -2,6 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
   "framework": null,
+  "regions": ["gru1"],
   "buildCommand": "npx prisma generate",
   "functions": {
     "api/index.ts": {

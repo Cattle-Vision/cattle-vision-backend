@@ -52,6 +52,7 @@ model Animal {
 
   @@unique([ownerId, tag])
   @@index([ownerId])
+  @@index([ownerId, createdAt])
 }
 
 model AnimalCollaborator {
@@ -90,6 +91,7 @@ model Photo {
   createdAt             DateTime  @default(now())
 
   @@index([animalId])
+  @@index([animalId, createdAt])
 }
 
 model VaccineRecord {

@@ -18,7 +18,7 @@
     "db:migrate:deploy": "node scripts/db-backup.js --best-effort && node scripts/with-env.js npx prisma migrate deploy",
     "db:backup": "node scripts/db-backup.js",
     "db:check": "node scripts/check-migrations.js --with-db",
-    "prepare": "husky",
+    "prepare": "node -e \"if(require('fs').existsSync('.git')) require('child_process').execSync('husky',{stdio:'inherit'})\"",
     "seed": "node scripts/with-env.js npx tsx prisma/seed.ts"
   },
   "prisma": {

@@ -5,7 +5,6 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import sharp from "sharp";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CustodyService } from "../animals/custody.service";
 import type { TokenPayload } from "../auth/jwt.utils";
@@ -86,6 +85,7 @@ export class PhotosService {
 
     if (targetWidth > 0 && targetWidth < 1600) {
       try {
+        const { default: sharp } = await import("sharp");
         const pipeline = sharp(resolved.buffer)
           .rotate()
           .resize(targetWidth, null, { withoutEnlargement: true });

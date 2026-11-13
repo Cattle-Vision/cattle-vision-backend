@@ -1,7 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import fs from "fs";
 import path from "path";
-import sharp from "sharp";
+import type sharp from "sharp";
 
 export interface NormalizedBox {
   cx: number;
@@ -110,8 +110,16 @@ export class AiVisionService {
   private sessionLoadAttempted = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private modelInitPromise: Promise<{ session: any; ort: any } | null> | null = null;
+  private sharpLoader: typeof sharp | null = null;
   /** Fila mutex para garantir inferência ONNX estritamente sequencial (1 imagem por vez). */
   private inferenceQueue: Promise<void> = Promise.resolve();
+
+  private async getSharp(): Promise<typeof sharp> {
+    if (!this.sharpLoader) {
+      this.sharpLoader = (await import("sharp")).default;
+    }
+    return this.sharpLoader;
+  }
 
   private enqueueInference<T>(task: () => Promise<T>): Promise<T> {
     const run = this.inferenceQueue.then(task, task);
@@ -291,7 +299,8 @@ export class AiVisionService {
 
   private async fallbackVisionScore(imageBuffer: Buffer): Promise<RearDetectionResult> {
     try {
-      const img = sharp(imageBuffer).rotate();
+      const sharpFn = await this.getSharp();
+      const img = sharpFn(imageBuffer).rotate();
       const stats = await img.resize(320, 320, { fit: "cover" }).stats();
 
       const r = stats.channels[0];
@@ -397,7 +406,8 @@ export class AiVisionService {
     const padX = Math.floor((targetSize - scaledW) / 2);
     const padY = Math.floor((targetSize - scaledH) / 2);
 
-    const { data } = await sharp(rgb.data, {
+    const sharpFn = await this.getSharp();
+    const { data } = await sharpFn(rgb.data, {
       raw: { width: rgb.width, height: rgb.height, channels: 3 },
     })
       .resize(targetSize, targetSize, {
@@ -499,7 +509,8 @@ export class AiVisionService {
     if (!this.faceSession) return { score: 0, box: null };
 
     try {
-      const { data } = await sharp(rgb.data, {
+      const sharpFn = await this.getSharp();
+    const { data } = await sharpFn(rgb.data, {
         raw: { width: rgb.width, height: rgb.height, channels: 3 },
       })
         .resize(FACE_INPUT_WIDTH, FACE_INPUT_HEIGHT, { fit: "fill" })
@@ -746,7 +757,8 @@ export class AiVisionService {
       const { session: sess, ort } = loaded;
 
       try {
-        const normalized = await sharp(imageBuffer)
+        const sharpFn = await this.getSharp();
+        const normalized = await sharpFn(imageBuffer)
           .rotate()
           .removeAlpha()
           .toColorspace("srgb")
@@ -780,7 +792,7 @@ export class AiVisionService {
         const cropLeft = Math.floor((origW - cropW) / 2);
         const cropTop = Math.floor((origH - cropH) / 2);
 
-        const cropped = await sharp(normalized.data, {
+        const cropped = await sharpFn(normalized.data, {
           raw: { width: origW, height: origH, channels: 3 },
         })
           .extract({ left: cropLeft, top: cropTop, width: cropW, height: cropH })

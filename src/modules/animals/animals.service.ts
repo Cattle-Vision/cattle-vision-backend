@@ -32,6 +32,19 @@ export const photoMetadataSelect = {
   createdAt: true,
 } as const;
 
+export const photoSummarySelect = {
+  id: true,
+  animalId: true,
+  view: true,
+  score: true,
+  icsStatus: true,
+  icsScore: true,
+  icsClassification: true,
+  slaughterReady: true,
+  slaughterStatus: true,
+  createdAt: true,
+} as const;
+
 /**
  * Serviço Principal de Rebanho (`src/modules/animals/animals.service.ts`).
  */
@@ -165,29 +178,37 @@ export class AnimalsService {
         ? Math.min(200, Math.round(rawLimit))
         : undefined;
 
-    const { ownedIds, sharedIds } = await this.custodyService.getAccessibleAnimalIds(
-      userId,
-      isAdmin
-    );
-    const allIds = Array.from(new Set([...ownedIds, ...sharedIds]));
-
-    if (!isAdmin && allIds.length === 0) {
-      return [];
-    }
-
-    const animals = await this.prisma.animal.findMany({
-      where: isAdmin ? {} : { id: { in: allIds } },
-      include: {
-        photos: {
-          select: photoMetadataSelect,
-          orderBy: { createdAt: "desc" },
-          ...(summaryOnly ? { take: 1 } : {}),
-        },
-        ...(summaryOnly ? { _count: { select: { photos: true } } } : {}),
+    const photoSelect = summaryOnly ? photoSummarySelect : photoMetadataSelect;
+    const includeClause = {
+      photos: {
+        select: photoSelect,
+        orderBy: { createdAt: "desc" as const },
+        ...(summaryOnly ? { take: 1 } : {}),
       },
-      orderBy: { createdAt: "desc" },
-      ...(limit ? { take: limit } : {}),
-    });
+      ...(summaryOnly ? { _count: { select: { photos: true } } } : {}),
+    };
+
+    // Consulta unica em vez de buscar IDs primeiro e depois hidratar animais,
+    // reduzindo drasticamente round-trips ao Neon PostgreSQL.
+    const animals = await this.prisma.animal
+      .findMany({
+        where: isAdmin
+          ? {}
+          : {
+              OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
+            },
+        include: includeClause,
+        orderBy: { createdAt: "desc" },
+        ...(limit ? { take: limit } : {}),
+      })
+      .catch(async () =>
+        this.prisma.animal.findMany({
+          where: isAdmin ? {} : { ownerId: userId },
+          include: includeClause,
+          orderBy: { createdAt: "desc" },
+          ...(limit ? { take: limit } : {}),
+        })
+      );
 
     return animals.map((a) => {
       const base = this.formatAnimalWithIcs(a);
@@ -207,6 +228,8 @@ export class AnimalsService {
     const userId = Number(user.id);
     const isAdmin = user.role === "ADMIN";
 
+    // Busca unica incluindo owner e colaboradores para validar permissao e montar
+    // o bloco de custodia em memoria sem round-trips sequenciais extras ao banco.
     const animal = await this.prisma.animal.findUnique({
       where: { id: animalId },
       include: {
@@ -215,6 +238,13 @@ export class AnimalsService {
         diseases: { orderBy: { diagnosedAt: "desc" } },
         locationLogs: { orderBy: { movedAt: "desc" } },
         observationRecords: { orderBy: { observedAt: "desc" } },
+        owner: { select: { id: true, name: true, email: true } },
+        collaborators: {
+          include: {
+            user: { select: { id: true, name: true, email: true } },
+          },
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
 
@@ -222,17 +252,49 @@ export class AnimalsService {
       throw new NotFoundException("Animal não encontrado");
     }
 
-    const hasAccess = await this.custodyService.canAccessAnimal(
-      animal.id,
-      animal.ownerId,
-      userId,
-      isAdmin
-    );
-    if (!hasAccess) {
+    const isOwner = animal.ownerId === userId;
+    const isCollaborator = animal.collaborators.some((c) => c.userId === userId);
+    if (!isAdmin && !isOwner && !isCollaborator) {
       throw new ForbiddenException("Você não possui permissão para visualizar este animal.");
     }
 
-    return this.formatAnimalWithIcsAndCustody(animal, userId, isAdmin);
+    const base = this.formatAnimalWithIcs({
+      ...animal,
+      owner: undefined,
+      collaborators: undefined,
+    });
+
+    const ownerInfo = animal.owner || {
+      id: animal.ownerId,
+      name: "Proprietário",
+      email: "proprietario@fazenda.com",
+    };
+
+    const collaboratorsList = animal.collaborators.map((r) => ({
+      id: r.id,
+      animalId: r.animalId,
+      userId: r.userId,
+      role: r.role,
+      createdAt: r.createdAt.toISOString(),
+      user: {
+        id: r.user.id,
+        name: r.user.name || "Operador",
+        email: r.user.email || "",
+      },
+    }));
+
+    return {
+      ...base,
+      isOwner,
+      isShared: !isOwner,
+      custody: {
+        isOwner,
+        isCollaborator,
+        canManage: isOwner || isAdmin,
+        owner: ownerInfo,
+        collaborators: collaboratorsList,
+      },
+    };
   }
 
   async createAnimal(

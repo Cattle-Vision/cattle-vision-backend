@@ -19,7 +19,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   }
 
   async onModuleInit(): Promise<void> {
-    await this.$connect();
+    // Em ambiente Serverless (Vercel), a conexao abre sob demanda na primeira query para
+    // evitar bloqueio de handshake TLS em rotas leves como /api/health e cold starts.
+    if (process.env.VERCEL !== "1") {
+      await this.$connect();
+    }
   }
 
   async onModuleDestroy(): Promise<void> {

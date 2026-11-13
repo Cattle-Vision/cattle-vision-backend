@@ -3,7 +3,6 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import AdmZip from "adm-zip";
 import bcrypt from "bcryptjs";
 import { runWithConcurrency } from "../../common/utils/async.utils";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -98,6 +97,7 @@ export class AdminService {
         : str;
     };
 
+    const { default: AdmZip } = await import("adm-zip");
     const zip = new AdmZip();
     const manifest: Array<Record<string, unknown>> = [];
     const csvRows: string[] = [

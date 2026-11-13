@@ -144,6 +144,9 @@ CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 CREATE INDEX "Animal_ownerId_idx" ON "Animal"("ownerId");
 
 -- CreateIndex
+CREATE INDEX "Animal_ownerId_createdAt_idx" ON "Animal"("ownerId", "createdAt");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "Animal_ownerId_tag_key" ON "Animal"("ownerId", "tag");
 
 -- CreateIndex
@@ -157,6 +160,9 @@ CREATE UNIQUE INDEX "AnimalCollaborator_animalId_userId_key" ON "AnimalCollabora
 
 -- CreateIndex
 CREATE INDEX "Photo_animalId_idx" ON "Photo"("animalId");
+
+-- CreateIndex
+CREATE INDEX "Photo_animalId_createdAt_idx" ON "Photo"("animalId", "createdAt");
 
 -- CreateIndex
 CREATE INDEX "VaccineRecord_animalId_appliedAt_idx" ON "VaccineRecord"("animalId", "appliedAt");

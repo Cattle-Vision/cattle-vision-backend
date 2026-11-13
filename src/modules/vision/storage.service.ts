@@ -2,7 +2,6 @@ import { Injectable } from "@nestjs/common";
 import { del, get, put } from "@vercel/blob";
 import { existsSync, promises as fs } from "fs";
 import path from "path";
-import sharp from "sharp";
 
 const STORAGE_ROOT = path.join(process.cwd(), "storage");
 const UPLOADS_DIR = path.join(STORAGE_ROOT, "uploads");
@@ -24,6 +23,7 @@ export class StorageService {
    */
   async optimizeImageBuffer(inputBuffer: Buffer): Promise<Buffer> {
     try {
+      const { default: sharp } = await import("sharp");
       const pipeline = sharp(inputBuffer);
       const meta = await pipeline.metadata();
       const maxDim = Math.max(meta.width ?? 0, meta.height ?? 0);
