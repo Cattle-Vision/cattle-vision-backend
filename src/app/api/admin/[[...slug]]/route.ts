@@ -14,6 +14,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { readPhotoBuffer } from "@/lib/storage";
 import { analyzeRearImage } from "@/lib/ai";
+import { runWithConcurrency } from "@/lib/async";
 import bcrypt from "bcryptjs";
 import { handleCorsPreflight, corsJsonResponse, getCorsHeaders } from "@/lib/cors";
 import { requireAdmin } from "@/lib/auth-guard";
@@ -126,66 +127,74 @@ export async function GET(req: Request, context: Context) {
         ].join(","),
       ];
 
-      for (const animal of animals) {
-        for (const photo of animal.photos) {
-          const fileName = `${animal.tag}_${photo.id}.jpg`;
-          const filePath = `images/${fileName}`;
+      const exportItems = animals.flatMap((animal) =>
+        animal.photos.map((photo) => ({ animal, photo }))
+      );
 
-          try {
-            const photoData = await readPhotoBuffer(photo.filePath);
-            if (photoData?.buffer) {
-              zip.addFile(filePath, photoData.buffer);
-            }
-          } catch (err) {
-            console.error("[/api/admin/export] Erro ao ler foto:", photo.id, err);
-          }
-
-          manifest.push({
-            file: filePath,
-            photoId: photo.id,
-            animalId: animal.id,
-            tag: animal.tag,
-            name: animal.name,
-            breed: animal.breed,
-            sex: animal.sex,
-            weight: animal.weight,
-            age: animal.age,
-            view: photo.view,
-            aiScore: photo.score,
-            createdAt: photo.createdAt.toISOString(),
-            owner: {
-              name: animal.owner.name,
-              email: animal.owner.email,
-            },
-          });
-
-          const escapeCsv = (val: unknown) => {
-            const str = String(val ?? "");
-            return str.includes(",") || str.includes('"') || str.includes("\n")
-              ? `"${str.replace(/"/g, '""')}"`
-              : str;
-          };
-
-          csvRows.push(
-            [
-              escapeCsv(filePath),
-              escapeCsv(photo.id),
-              escapeCsv(animal.id),
-              escapeCsv(animal.tag),
-              escapeCsv(animal.name),
-              escapeCsv(animal.breed),
-              escapeCsv(animal.sex),
-              escapeCsv(animal.weight),
-              escapeCsv(animal.age),
-              escapeCsv(photo.view),
-              escapeCsv(photo.score ?? ""),
-              escapeCsv(photo.createdAt.toISOString()),
-              escapeCsv(animal.owner.name),
-              escapeCsv(animal.owner.email),
-            ].join(",")
-          );
+      // Baixa buffers das fotos em lotes paralelos para evitar timeouts em datasets maiores
+      const fetchedBuffers = await runWithConcurrency(exportItems, 6, async ({ photo }) => {
+        try {
+          const photoData = await readPhotoBuffer(photo.filePath);
+          return photoData?.buffer ?? null;
+        } catch (err) {
+          console.error("[/api/admin/export] Erro ao ler foto:", photo.id, err);
+          return null;
         }
-      }
+      });
+
+      const escapeCsv = (val: unknown) => {
+        const str = String(val ?? "");
+        return str.includes(",") || str.includes('"') || str.includes("\n")
+          ? `"${str.replace(/"/g, '""')}"`
+          : str;
+      };
+
+      exportItems.forEach(({ animal, photo }, idx) => {
+        const fileName = `${animal.tag}_${photo.id}.jpg`;
+        const filePath = `images/${fileName}`;
+        const buf = fetchedBuffers[idx];
+        if (buf) {
+          zip.addFile(filePath, buf);
+        }
+
+        manifest.push({
+          file: filePath,
+          photoId: photo.id,
+          animalId: animal.id,
+          tag: animal.tag,
+          name: animal.name,
+          breed: animal.breed,
+          sex: animal.sex,
+          weight: animal.weight,
+          age: animal.age,
+          view: photo.view,
+          aiScore: photo.score,
+          createdAt: photo.createdAt.toISOString(),
+          owner: {
+            name: animal.owner.name,
+            email: animal.owner.email,
+          },
+        });
+
+        csvRows.push(
+          [
+            escapeCsv(filePath),
+            escapeCsv(photo.id),
+            escapeCsv(animal.id),
+            escapeCsv(animal.tag),
+            escapeCsv(animal.name),
+            escapeCsv(animal.breed),
+            escapeCsv(animal.sex),
+            escapeCsv(animal.weight),
+            escapeCsv(animal.age),
+            escapeCsv(photo.view),
+            escapeCsv(photo.score ?? ""),
+            escapeCsv(photo.createdAt.toISOString()),
+            escapeCsv(animal.owner.name),
+            escapeCsv(animal.owner.email),
+          ].join(",")
+        );
+      });
 
       zip.addFile("manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf-8"));
       zip.addFile("dataset.csv", Buffer.from(csvRows.join("\n"), "utf-8"));
@@ -244,12 +253,12 @@ export async function POST(req: Request, context: Context) {
     const affectedAnimalIds = new Set<string>();
     const results: Array<{ id: string; tag?: string; oldScore: number | null; newScore: number }> = [];
 
-    for (const photo of photos) {
+    await runWithConcurrency(photos, 4, async (photo) => {
       try {
         const photoData = await readPhotoBuffer(photo.filePath);
         if (!photoData?.buffer) {
           console.warn(`[admin/recalibrate] Buffer indisponível para foto ${photo.id}`);
-          continue;
+          return;
         }
 
         const analysis = await analyzeRearImage(photoData.buffer);
@@ -273,7 +282,7 @@ export async function POST(req: Request, context: Context) {
       } catch (err) {
         console.warn(`[admin/recalibrate] Erro ao recalcular foto ${photo.id}:`, err);
       }
-    }
+    });
 
     if (affectedAnimalIds.size > 0) {
       await prisma.animal

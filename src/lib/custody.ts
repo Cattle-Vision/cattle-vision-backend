@@ -13,42 +13,60 @@
 import { prisma } from "@/lib/prisma";
 
 let tableEnsured = false;
+let ensurePromise: Promise<void> | null = null;
 
 /**
- * Cria a tabela de guarda compartilhada de forma idempotente e autônoma,
- * executando cada instrução DDL isoladamente para compatibilidade universal com Neon/pgBouncer.
+ * Garante a existência da tabela de guarda compartilhada de forma idempotente e leve.
+ * Evita disparar 4 instruções DDL em todo cold start checando antes via `to_regclass`
+ * e deduplicando chamadas concorrentes com uma promise compartilhada.
  */
 export async function ensureCustodyTable(): Promise<void> {
   if (tableEnsured) return;
-  try {
-    await prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "AnimalCollaborator" (
-        "id" TEXT NOT NULL PRIMARY KEY,
-        "animalId" TEXT NOT NULL,
-        "userId" INTEGER NOT NULL,
-        "role" TEXT NOT NULL DEFAULT 'COLLABORATOR',
-        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT "AnimalCollaborator_animalId_fkey" FOREIGN KEY ("animalId") REFERENCES "Animal"("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        CONSTRAINT "AnimalCollaborator_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE
-      )
-    `);
+  if (ensurePromise) return ensurePromise;
 
-    await prisma.$executeRawUnsafe(`
-      CREATE UNIQUE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_userId_key" ON "AnimalCollaborator"("animalId", "userId")
-    `);
+  ensurePromise = (async () => {
+    try {
+      const existing = await prisma.$queryRaw<Array<{ reg: string | null }>>`
+        SELECT to_regclass('"AnimalCollaborator"')::text AS reg
+      `;
+      if (existing?.[0]?.reg) {
+        tableEnsured = true;
+        return;
+      }
 
-    await prisma.$executeRawUnsafe(`
-      CREATE INDEX IF NOT EXISTS "AnimalCollaborator_userId_idx" ON "AnimalCollaborator"("userId")
-    `);
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "AnimalCollaborator" (
+          "id" TEXT NOT NULL PRIMARY KEY,
+          "animalId" TEXT NOT NULL,
+          "userId" INTEGER NOT NULL,
+          "role" TEXT NOT NULL DEFAULT 'COLLABORATOR',
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "AnimalCollaborator_animalId_fkey" FOREIGN KEY ("animalId") REFERENCES "Animal"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+          CONSTRAINT "AnimalCollaborator_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE
+        )
+      `);
 
-    await prisma.$executeRawUnsafe(`
-      CREATE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_idx" ON "AnimalCollaborator"("animalId")
-    `);
+      await prisma.$executeRawUnsafe(`
+        CREATE UNIQUE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_userId_key" ON "AnimalCollaborator"("animalId", "userId")
+      `);
 
-    tableEnsured = true;
-  } catch (err) {
-    console.warn("[custody] ensureCustodyTable warning:", err);
-  }
+      await prisma.$executeRawUnsafe(`
+        CREATE INDEX IF NOT EXISTS "AnimalCollaborator_userId_idx" ON "AnimalCollaborator"("userId")
+      `);
+
+      await prisma.$executeRawUnsafe(`
+        CREATE INDEX IF NOT EXISTS "AnimalCollaborator_animalId_idx" ON "AnimalCollaborator"("animalId")
+      `);
+
+      tableEnsured = true;
+    } catch (err) {
+      console.warn("[custody] ensureCustodyTable warning:", err);
+    } finally {
+      ensurePromise = null;
+    }
+  })();
+
+  return ensurePromise;
 }
 
 export interface CustodyUser {
@@ -109,24 +127,20 @@ export async function getAccessibleAnimalIds(userId: number, isAdmin: boolean): 
     return { ownedIds: all.map((a) => a.id), sharedIds: [] };
   }
 
-  const owned = await prisma.animal.findMany({
-    where: { ownerId: userId },
-    select: { id: true },
-  });
-
-  let sharedIds: string[] = [];
-  try {
-    const sharedRecords = await prisma.$queryRaw<Array<{ animalId: string }>>`
+  // Paraleliza consulta de animais próprios e compartilhados para reduzir latência no Neon
+  const [owned, sharedRecords] = await Promise.all([
+    prisma.animal.findMany({
+      where: { ownerId: userId },
+      select: { id: true },
+    }),
+    prisma.$queryRaw<Array<{ animalId: string }>>`
       SELECT "animalId" FROM "AnimalCollaborator" WHERE "userId" = ${userId}
-    `;
-    sharedIds = (sharedRecords || []).map((r) => r.animalId);
-  } catch {
-    sharedIds = [];
-  }
+    `.catch(() => [] as Array<{ animalId: string }>),
+  ]);
 
   return {
     ownedIds: owned.map((o) => o.id),
-    sharedIds,
+    sharedIds: (sharedRecords || []).map((r) => r.animalId),
   };
 }
 
@@ -262,22 +276,13 @@ export async function getCustodyDetails(
   const isOwner = ownerId === currentUserId;
   const canManage = isOwner || isAdmin;
 
-  // Busca dados do proprietário
-  const ownerRecord = await prisma.user.findUnique({
-    where: { id: ownerId },
-    select: { id: true, name: true, email: true },
-  });
-
-  const owner: CustodyUser = ownerRecord || {
-    id: ownerId,
-    name: "Proprietário",
-    email: "proprietario@fazenda.com",
-  };
-
-  // Busca colaboradores
-  let collaborators: AnimalCollaboratorRecord[] = [];
-  try {
-    const rawCollaborators = await prisma.$queryRaw<
+  // Busca proprietário e colaboradores em paralelo para reduzir roundtrips
+  const [ownerRecord, rawCollaborators] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: ownerId },
+      select: { id: true, name: true, email: true },
+    }),
+    prisma.$queryRaw<
       Array<{
         id: string;
         animalId: string;
@@ -294,23 +299,27 @@ export async function getCustodyDetails(
       INNER JOIN "User" u ON u."id" = c."userId"
       WHERE c."animalId" = ${animalId}
       ORDER BY c."createdAt" ASC
-    `;
+    `.catch(() => []),
+  ]);
 
-    collaborators = (rawCollaborators || []).map((r) => ({
-      id: r.id,
-      animalId: r.animalId,
-      userId: r.userId,
-      role: r.role,
-      createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : new Date().toISOString(),
-      user: {
-        id: r.userId,
-        name: r.userName || "Operador",
-        email: r.userEmail || "",
-      },
-    }));
-  } catch (err) {
-    collaborators = [];
-  }
+  const owner: CustodyUser = ownerRecord || {
+    id: ownerId,
+    name: "Proprietário",
+    email: "proprietario@fazenda.com",
+  };
+
+  const collaborators: AnimalCollaboratorRecord[] = (rawCollaborators || []).map((r) => ({
+    id: r.id,
+    animalId: r.animalId,
+    userId: r.userId,
+    role: r.role,
+    createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : new Date().toISOString(),
+    user: {
+      id: r.userId,
+      name: r.userName || "Operador",
+      email: r.userEmail || "",
+    },
+  }));
 
   const isCollaborator = collaborators.some((c) => c.userId === currentUserId);
 

@@ -39,6 +39,8 @@ let session: any | null = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ortModule: any | null = null;
 let sessionLoadAttempted = false;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let modelInitPromise: Promise<{ session: any; ort: any } | null> | null = null;
 
 function resolveModelPath(): string | null {
   const candidates = [
@@ -67,43 +69,52 @@ function resolveModelPath(): string | null {
 export async function initModel(): Promise<{ session: any; ort: any } | null> {
   if (session && ortModule) return { session, ort: ortModule };
   if (sessionLoadAttempted && (!session || !ortModule)) return null;
-  sessionLoadAttempted = true;
+  if (modelInitPromise) return modelInitPromise;
 
-  const modelPath = resolveModelPath();
-  if (!modelPath) {
-    console.warn("[AI] Arquivo identifier.onnx não encontrado nos caminhos mapeados.");
-    return null;
-  }
+  // Deduplica inicializações concorrentes do grafo ONNX (~10MB)
+  modelInitPromise = (async () => {
+    sessionLoadAttempted = true;
 
-  // No Linux (ambiente Vercel Serverless / AWS Lambda), injeta o diretório da libonnxruntime no LD_LIBRARY_PATH
-  if (process.platform === "linux") {
-    const candidateDirs = [
-      path.resolve(process.cwd(), "node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
-      path.resolve(__dirname, "../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
-      path.resolve(__dirname, "../../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
-      path.resolve(__dirname, "../../../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
-    ];
-    for (const dir of candidateDirs) {
-      if (fs.existsSync(dir)) {
-        const currentLd = process.env.LD_LIBRARY_PATH || "";
-        if (!currentLd.includes(dir)) {
-          process.env.LD_LIBRARY_PATH = currentLd ? `${dir}:${currentLd}` : dir;
+    const modelPath = resolveModelPath();
+    if (!modelPath) {
+      console.warn("[AI] Arquivo identifier.onnx não encontrado nos caminhos mapeados.");
+      return null;
+    }
+
+    // No Linux (ambiente Vercel Serverless / AWS Lambda), injeta o diretório da libonnxruntime no LD_LIBRARY_PATH
+    if (process.platform === "linux") {
+      const candidateDirs = [
+        path.resolve(process.cwd(), "node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
+        path.resolve(__dirname, "../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
+        path.resolve(__dirname, "../../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
+        path.resolve(__dirname, "../../../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
+      ];
+      for (const dir of candidateDirs) {
+        if (fs.existsSync(dir)) {
+          const currentLd = process.env.LD_LIBRARY_PATH || "";
+          if (!currentLd.includes(dir)) {
+            process.env.LD_LIBRARY_PATH = currentLd ? `${dir}:${currentLd}` : dir;
+          }
+          break;
         }
-        break;
       }
     }
-  }
 
-  try {
-    const ort = await import("onnxruntime-node");
-    session = await ort.InferenceSession.create(modelPath);
-    ortModule = ort;
-    console.log("[AI] Modelo YOLOv8 identifier.onnx carregado com sucesso via onnxruntime-node.");
-    return { session, ort };
-  } catch (err) {
-    console.warn("[AI] Modelo ONNX nativo indisponível, ativando fallback óptico dinâmico:", (err as Error).message);
-    return null;
-  }
+    try {
+      const ort = await import("onnxruntime-node");
+      session = await ort.InferenceSession.create(modelPath);
+      ortModule = ort;
+      console.log("[AI] Modelo YOLOv8 identifier.onnx carregado com sucesso via onnxruntime-node.");
+      return { session, ort };
+    } catch (err) {
+      console.warn("[AI] Modelo ONNX nativo indisponível, ativando fallback óptico dinâmico:", (err as Error).message);
+      return null;
+    } finally {
+      modelInitPromise = null;
+    }
+  })();
+
+  return modelInitPromise;
 }
 
 /** Resolução de entrada padrão treinada pelo modelo YOLOv8 */
@@ -248,11 +259,15 @@ export async function analyzeRearImage(imageBuffer: Buffer): Promise<RearDetecti
     const totalPixels = TARGET_INFERENCE_SIZE * TARGET_INFERENCE_SIZE;
     const float32Data = new Float32Array(totalPixels * 3);
 
-    // Normalização CHW [1, 3, 640, 640] com valores no intervalo [0.0, 1.0]
-    for (let c = 0; c < 3; c++) {
-      for (let i = 0; i < totalPixels; i++) {
-        float32Data[c * totalPixels + i] = data[i * 3 + c] / 255.0;
-      }
+    // Normalização CHW [1, 3, 640, 640] em passada única sobre `data` para melhor localidade de cache
+    const inv255 = 1 / 255.0;
+    const planeG = totalPixels;
+    const planeB = totalPixels * 2;
+    for (let i = 0; i < totalPixels; i++) {
+      const base = i * 3;
+      float32Data[i] = data[base] * inv255;
+      float32Data[planeG + i] = data[base + 1] * inv255;
+      float32Data[planeB + i] = data[base + 2] * inv255;
     }
 
     const inputTensor = new ort.Tensor("float32", float32Data, [

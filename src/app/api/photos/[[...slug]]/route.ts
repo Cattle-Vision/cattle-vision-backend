@@ -9,6 +9,7 @@
  * - DELETE /api/photos/[id]: remove a foto do banco e do storage.
  */
 import { NextResponse } from "next/server";
+import sharp from "sharp";
 import { prisma } from "@/lib/prisma";
 import { readPhotoBuffer, deleteStoredFile, storePhotoBuffer } from "@/lib/storage";
 import { analyzeRearImage } from "@/lib/ai";
@@ -62,20 +63,67 @@ export async function GET(request: Request, context: Context) {
   }
 
   try {
+    const { searchParams } = new URL(request.url);
+    const rawWidth = Number(searchParams.get("w") || "0");
+    // Permite gerar miniaturas leves sob demanda (?w=480) sem alterar a imagem original armazenada
+    const targetWidth =
+      Number.isFinite(rawWidth) && rawWidth >= 120 && rawWidth <= 1600
+        ? Math.round(rawWidth)
+        : 0;
+    const acceptHeader = (request.headers.get("accept") || "").toLowerCase();
+    const wantsWebp = targetWidth > 0 && acceptHeader.includes("image/webp");
+    const etag = `"${photo.id}-${targetWidth || "full"}-${wantsWebp ? "webp" : "orig"}"`;
+
+    const corsHeaders = getCorsHeaders(request);
+    const cacheControl = "public, max-age=31536000, immutable";
+
+    if (request.headers.get("if-none-match") === etag) {
+      return new NextResponse(null, {
+        status: 304,
+        headers: {
+          ...corsHeaders,
+          ETag: etag,
+          "Cache-Control": cacheControl,
+          Vary: "Accept",
+        },
+      });
+    }
+
     const resolved = await readPhotoBuffer(photo.filePath);
     if (!resolved) {
       return corsJsonResponse({ error: "Arquivo de imagem indisponível no storage" }, 404, request);
     }
 
-    const corsHeaders = getCorsHeaders(request);
+    let outputBuffer = resolved.buffer;
+    let outputContentType = resolved.contentType;
 
-    return new NextResponse(new Uint8Array(resolved.buffer), {
+    if (targetWidth > 0 && targetWidth < 1600) {
+      try {
+        const pipeline = sharp(resolved.buffer)
+          .rotate()
+          .resize(targetWidth, null, { withoutEnlargement: true });
+
+        if (wantsWebp) {
+          outputBuffer = await pipeline.webp({ quality: 78 }).toBuffer();
+          outputContentType = "image/webp";
+        } else {
+          outputBuffer = await pipeline.jpeg({ quality: 78, mozjpeg: true }).toBuffer();
+          outputContentType = "image/jpeg";
+        }
+      } catch {
+        // Caso sharp não consiga decodificar algum formato raro, entrega o buffer original
+      }
+    }
+
+    return new NextResponse(new Uint8Array(outputBuffer), {
       status: 200,
       headers: {
         ...corsHeaders,
-        "Content-Type": resolved.contentType,
-        "Content-Length": String(resolved.buffer.byteLength),
-        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "Content-Type": outputContentType,
+        "Content-Length": String(outputBuffer.byteLength),
+        "Cache-Control": cacheControl,
+        ETag: etag,
+        Vary: "Accept",
       },
     });
   } catch (err) {

@@ -126,9 +126,26 @@ export async function readPhotoBuffer(
   // 2. Vercel Blob Storage
   if (filePath.includes(".blob.vercel-storage.com")) {
     const isPrivateUrl = filePath.includes(".private.blob.vercel-storage.com");
+    const blobToken = process.env.BLOB_READ_WRITE_TOKEN?.trim();
+
+    // Para blobs públicos, fetch direto via CDN evita o overhead inicial do SDK
+    if (!isPrivateUrl) {
+      try {
+        const res = await fetch(filePath);
+        if (res.ok) {
+          const arrayBuffer = await res.arrayBuffer();
+          return {
+            buffer: Buffer.from(arrayBuffer),
+            contentType: res.headers.get("content-type") || "image/jpeg",
+          };
+        }
+      } catch {
+        // segue para tentativa autenticada via SDK
+      }
+    }
+
     const primaryAccess = isPrivateUrl ? "private" : "public";
     const secondaryAccess = isPrivateUrl ? "public" : "private";
-    const blobToken = process.env.BLOB_READ_WRITE_TOKEN?.trim();
 
     for (const accessMode of [primaryAccess, secondaryAccess] as const) {
       try {
@@ -144,26 +161,26 @@ export async function readPhotoBuffer(
           };
         }
       } catch {
-        // tenta proximo modo
+        // tenta próximo modo apenas se falhar
       }
     }
 
-    // Fallback com fetch direto
-    try {
-      const headers: Record<string, string> = {};
-      if (blobToken) {
-        headers["Authorization"] = `Bearer ${blobToken}`;
+    // Fallback com fetch autenticado para blobs privados quando o SDK falhar
+    if (blobToken) {
+      try {
+        const res = await fetch(filePath, {
+          headers: { Authorization: `Bearer ${blobToken}` },
+        });
+        if (res.ok) {
+          const arrayBuffer = await res.arrayBuffer();
+          return {
+            buffer: Buffer.from(arrayBuffer),
+            contentType: res.headers.get("content-type") || "image/jpeg",
+          };
+        }
+      } catch {
+        return null;
       }
-      const res = await fetch(filePath, { headers });
-      if (res.ok) {
-        const arrayBuffer = await res.arrayBuffer();
-        return {
-          buffer: Buffer.from(arrayBuffer),
-          contentType: res.headers.get("content-type") || "image/jpeg",
-        };
-      }
-    } catch {
-      return null;
     }
 
     return null;

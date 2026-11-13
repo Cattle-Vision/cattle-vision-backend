@@ -21,6 +21,7 @@ import { prisma } from "@/lib/prisma";
 import { isValidTag, normalizeTag } from "@/lib/animal";
 import { readPhotoBuffer, deleteStoredFile } from "@/lib/storage";
 import { analyzeRearImage } from "@/lib/ai";
+import { runWithConcurrency } from "@/lib/async";
 import { handleCorsPreflight, corsJsonResponse } from "@/lib/cors";
 import { requireAuth } from "@/lib/auth-guard";
 import {
@@ -159,22 +160,40 @@ export async function GET(request: Request, context: Context) {
       return corsJsonResponse(result, 200, request);
     }
 
+    const summaryOnly = searchParams.get("summary") === "1";
+    const rawLimit = Number(searchParams.get("limit") || "0");
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(200, Math.round(rawLimit)) : undefined;
+
     // Busca IDs acessíveis (proprietário direto + colaboradores na tabela AnimalCollaborator)
     const { ownedIds, sharedIds } = await getAccessibleAnimalIds(userId, isAdmin);
     const allIds = Array.from(new Set([...ownedIds, ...sharedIds]));
 
+    if (!isAdmin && allIds.length === 0) {
+      return corsJsonResponse([], 200, request);
+    }
+
+    // No modo resumo (?summary=1), envia apenas a foto mais recente e a contagem total para acelerar o painel
     const animals = await prisma.animal.findMany({
       where: isAdmin ? {} : { id: { in: allIds } },
       include: {
-        photos: { select: photoMetadataSelect, orderBy: { createdAt: "desc" } },
+        photos: {
+          select: photoMetadataSelect,
+          orderBy: { createdAt: "desc" },
+          ...(summaryOnly ? { take: 1 } : {}),
+        },
+        ...(summaryOnly ? { _count: { select: { photos: true } } } : {}),
       },
       orderBy: { createdAt: "desc" },
+      ...(limit ? { take: limit } : {}),
     });
 
     const formatted = animals.map((a: any) => {
       const base = formatAnimalWithIcs(a);
+      const photoCount = a._count?.photos ?? base.photos?.length ?? 0;
+      const { _count, ...rest } = base;
       return {
-        ...base,
+        ...rest,
+        photoCount,
         isOwner: a.ownerId === userId,
         isShared: a.ownerId !== userId,
       };
@@ -360,10 +379,10 @@ export async function POST(request: Request, context: Context) {
     const affectedAnimalIds = new Set<string>();
     const results: Array<{ id: string; tag?: string; oldScore: number | null; newScore: number }> = [];
 
-    for (const photo of photos) {
+    await runWithConcurrency(photos, 4, async (photo) => {
       try {
         const photoData = await readPhotoBuffer(photo.filePath);
-        if (!photoData?.buffer) continue;
+        if (!photoData?.buffer) return;
 
         const analysis = await analyzeRearImage(photoData.buffer);
 
@@ -386,7 +405,7 @@ export async function POST(request: Request, context: Context) {
       } catch (err) {
         console.warn(`[recalibrate] Erro ao recalcular foto ${photo.id}:`, err);
       }
-    }
+    });
 
     if (affectedAnimalIds.size > 0) {
       await prisma.animal
@@ -452,10 +471,10 @@ export async function POST(request: Request, context: Context) {
     let updatedCount = 0;
     const results: Array<{ id: string; oldScore: number | null; newScore: number }> = [];
 
-    for (const photo of animal.photos) {
+    await runWithConcurrency(animal.photos, 4, async (photo) => {
       try {
         const photoData = await readPhotoBuffer(photo.filePath);
-        if (!photoData?.buffer) continue;
+        if (!photoData?.buffer) return;
 
         const analysis = await analyzeRearImage(photoData.buffer);
 
@@ -473,7 +492,7 @@ export async function POST(request: Request, context: Context) {
       } catch (err) {
         console.warn(`[recalibrate/animal] Erro ao recalcular foto ${photo.id}:`, err);
       }
-    }
+    });
 
     await prisma.animal
       .update({
@@ -698,7 +717,16 @@ export async function DELETE(request: Request, context: Context) {
       return corsJsonResponse({ error: result.message }, 400, request);
     }
 
-    const custody = await getCustodyDetails(animalId, userId, userId, isAdmin);
+    const updatedAnimal = await prisma.animal.findUnique({
+      where: { id: animalId },
+      select: { ownerId: true },
+    });
+    const custody = await getCustodyDetails(
+      animalId,
+      updatedAnimal?.ownerId ?? userId,
+      userId,
+      isAdmin
+    );
     return corsJsonResponse({ ...result, custody }, 200, request);
   }
 
@@ -723,13 +751,7 @@ export async function DELETE(request: Request, context: Context) {
         );
       }
 
-      for (const photo of animal.photos) {
-        try {
-          await deleteStoredFile(photo.filePath);
-        } catch {
-          // segue mesmo se o arquivo físico já tiver sido removido
-        }
-      }
+      await Promise.allSettled(animal.photos.map((photo) => deleteStoredFile(photo.filePath)));
 
       await prisma.photo.deleteMany({ where: { animalId } });
       await prisma.animal.delete({ where: { id: animalId } });
