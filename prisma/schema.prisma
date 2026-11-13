@@ -9,41 +9,150 @@ datasource db {
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
-  name      String
-  email     String   @unique
-  password  String
-  role      String   @default("USER")
-  createdAt DateTime @default(now())
-  animals   Animal[]
+  id            Int                  @id @default(autoincrement())
+  name          String
+  email         String               @unique
+  password      String
+  role          String               @default("USER")
+  createdAt     DateTime             @default(now())
+  animals       Animal[]
+  collaborators AnimalCollaborator[]
 }
 
 model Animal {
-  id        String   @id @default(cuid())
-  tag       String
-  name      String   @default("")
-  breed     String
-  sex       String
-  weight    Float
-  age       Int
-  ownerId   Int
-  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  photos    Photo[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                 String               @id @default(cuid())
+  tag                String
+  name               String               @default("")
+  breed              String
+  sex                String
+  weight             Float
+  age                Int
+  /// Comprimento / tamanho corporal em centímetros (RF07)
+  length             Float?
+  /// Localização atual do animal no manejo (pasto, piquete, retiro ou curral) (RF08)
+  location           String               @default("")
+  /// Resumo rápido / nota fixada de manejo (complementado pela tabela AnimalObservation) (RF08)
+  observations       String               @default("")
+  ownerId            Int
+  owner              User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  photos             Photo[]
+  collaborators      AnimalCollaborator[]
+  vaccines           VaccineRecord[]
+  diseases           DiseaseRecord[]
+  locationLogs       AnimalLocationLog[]
+  observationRecords AnimalObservation[]
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
 
   @@unique([ownerId, tag])
   @@index([ownerId])
 }
 
-model Photo {
+model AnimalCollaborator {
   id        String   @id @default(cuid())
   animalId  String
   animal    Animal   @relation(fields: [animalId], references: [id], onDelete: Cascade)
-  filePath  String
-  view      String   @default("REAR")
-  score     Float?
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String   @default("COLLABORATOR")
   createdAt DateTime @default(now())
 
+  @@unique([animalId, userId])
+  @@index([userId])
   @@index([animalId])
+}
+
+model Photo {
+  id                    String    @id @default(cuid())
+  animalId              String
+  animal                Animal    @relation(fields: [animalId], references: [id], onDelete: Cascade)
+  filePath              String
+  view                  String    @default("REAR")
+  /// Qualidade de enquadramento anatômico (YOLOv8 ONNX identifier.onnx, 0-100%)
+  score                 Float?
+  /// Infraestrutura preparada para avaliação futura de ICS, contorno e aptidão para abate (RF02-RF06)
+  icsStatus             String    @default("IN_DEVELOPMENT")
+  icsScore              Float?
+  icsClassification     String?
+  slaughterReady        Boolean?
+  slaughterStatus       String    @default("IN_DEVELOPMENT")
+  slaughterReason       String?
+  morphologicalFeatures Json?
+  contourPoints         Json?
+  aiModelVersion        String?
+  evaluatedAt           DateTime?
+  createdAt             DateTime  @default(now())
+
+  @@index([animalId])
+}
+
+model VaccineRecord {
+  id          String    @id @default(cuid())
+  animalId    String
+  animal      Animal    @relation(fields: [animalId], references: [id], onDelete: Cascade)
+  name        String
+  dose        String    @default("")
+  batch       String    @default("")
+  appliedAt   DateTime
+  nextDueAt   DateTime?
+  notes       String    @default("")
+  createdById Int?
+  createdAt   DateTime  @default(now())
+
+  @@index([animalId, appliedAt])
+}
+
+model DiseaseRecord {
+  id          String    @id @default(cuid())
+  animalId    String
+  animal      Animal    @relation(fields: [animalId], references: [id], onDelete: Cascade)
+  name        String
+  symptoms    String    @default("")
+  treatment   String    @default("")
+  /// ACTIVE | MONITORING | RECOVERED
+  status      String    @default("ACTIVE")
+  diagnosedAt DateTime
+  recoveredAt DateTime?
+  notes       String    @default("")
+  createdById Int?
+  createdAt   DateTime  @default(now())
+
+  @@index([animalId, diagnosedAt])
+}
+
+model AnimalLocationLog {
+  id        String   @id @default(cuid())
+  animalId  String
+  animal    Animal   @relation(fields: [animalId], references: [id], onDelete: Cascade)
+  location  String
+  reason    String   @default("")
+  movedAt   DateTime @default(now())
+  movedById Int?
+
+  @@index([animalId, movedAt])
+}
+
+model AnimalObservation {
+  id            String   @id @default(cuid())
+  animalId      String
+  animal        Animal   @relation(fields: [animalId], references: [id], onDelete: Cascade)
+  /// GERAL | MANEJO | NUTRICAO | COMPORTAMENTO | OUTRA
+  category      String   @default("GERAL")
+  title         String   @default("")
+  content       String
+  observedAt    DateTime @default(now())
+  createdById   Int?
+  createdByName String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([animalId, observedAt])
+}
+
+/// Tabela interna usada por prisma/seed.ts para controle idempotente de migrações de dados
+model CattleMigration {
+  name       String   @id
+  applied_at DateTime @default(now())
+
+  @@map("_cattle_migrations")
 }

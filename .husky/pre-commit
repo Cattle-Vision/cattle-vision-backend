@@ -1,0 +1,2 @@
+node scripts/check-migrations.js
+npm run typecheck

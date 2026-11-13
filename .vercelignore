@@ -2,9 +2,6 @@ Dockerfile
 docker-compose*.yml
 .dockerignore
 storage/uploads/**
-.next/cache/**
-node_modules/@esbuild
-node_modules/typescript
-node_modules/terser
-node_modules/webpack
+backups/**
+dist/**
 *.md
