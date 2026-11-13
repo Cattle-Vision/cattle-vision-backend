@@ -14,6 +14,7 @@ COPY prisma ./prisma/
 RUN npx prisma generate
 
 COPY . .
+RUN npm run build
 
 # Multi-stage Runner
 FROM node:22-slim AS runner
@@ -24,10 +25,13 @@ WORKDIR /app
 
 COPY --from=builder /app ./
 
+RUN mkdir -p /app/storage/uploads /app/backups
+
 ENV NODE_ENV=production
 ENV PORT=3001
 ENV CORS_ORIGIN="*"
 
 EXPOSE 3001
 
-CMD ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && npm run start"]
+# Executa backup preventivo (se já houver tabelas) e prisma migrate deploy (nunca db push destrutivo)
+CMD ["node", "scripts/safe-start.js"]

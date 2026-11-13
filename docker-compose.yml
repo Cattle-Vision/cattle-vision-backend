@@ -18,8 +18,10 @@ services:
       BLOB_STORE_ID: ${BLOB_STORE_ID:-}
     volumes:
       - ./storage:/app/storage
+      - ./backups:/app/backups
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
@@ -33,6 +35,12 @@ services:
       POSTGRES_DB: cattle_capture
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cattle_capture"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    stop_grace_period: 30s
     restart: unless-stopped
 
 volumes:

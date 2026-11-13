@@ -7,13 +7,15 @@
 .env
 .env*.local
 
-# Next.js build output
+# Build output
 /.next/
 /out/
+/dist/
 
-# Storage uploads
+# Storage uploads & database backups
 /storage/uploads/*
 !/storage/uploads/.gitkeep
+/backups/
 
 # TypeScript
 *.tsbuildinfo
