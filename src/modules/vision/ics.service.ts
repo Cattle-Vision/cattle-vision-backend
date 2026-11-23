@@ -97,6 +97,69 @@ export class IcsService {
     return this.buildPendingPlaceholder("NOT_REQUESTED");
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  formatPhotoRecordIcs(p: any): IcsEvaluationResult {
+    if (p?.icsStatus === "CALCULATED" && typeof p.icsScore === "number") {
+      const slaughterReady =
+        typeof p.slaughterReady === "boolean" ? p.slaughterReady : null;
+      return {
+        aiAvailable: true,
+        status: "CALCULATED",
+        score: p.icsScore,
+        scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
+        classification: p.icsClassification || getIcsClassification(p.icsScore),
+        slaughterReady,
+        slaughterStatus: p.slaughterStatus || "IN_DEVELOPMENT",
+        slaughterLabel:
+          slaughterReady === true
+            ? "Apto para abate"
+            : slaughterReady === false
+            ? "Ainda não apto"
+            : "Aguardando definição",
+        slaughterReason: p.slaughterReason || "Avaliado pelo modelo neural.",
+        morphologicalFeatures: p.morphologicalFeatures ?? null,
+        contourPoints: Array.isArray(p.contourPoints) ? p.contourPoints : null,
+        aiModelVersion: p.aiModelVersion ?? null,
+        message: "Avaliação de ICS calculada.",
+        source: "internal-backend",
+        estimatedAt: p.evaluatedAt
+          ? new Date(p.evaluatedAt).toISOString()
+          : new Date(p.createdAt || Date.now()).toISOString(),
+      };
+    }
+
+    if (p?.icsStatus === "QUEUED") {
+      return this.buildPendingPlaceholder("QUEUED");
+    }
+    if (p?.icsStatus === "PROCESSING") {
+      return this.buildPendingPlaceholder("PROCESSING");
+    }
+    if (p?.icsStatus === "FAILED" || p?.icsStatus === "ERROR") {
+      return this.buildPendingPlaceholder(p.icsStatus, p?.slaughterReason || undefined);
+    }
+
+    return this.buildPendingPlaceholder("NOT_REQUESTED");
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  summarizeAnimalIcs(formattedPhotos: Array<{ ics?: IcsEvaluationResult }>): IcsEvaluationResult {
+    const latestCalculated = formattedPhotos.find((p) => p.ics?.status === "CALCULATED")?.ics;
+    if (latestCalculated) return latestCalculated;
+
+    const processing = formattedPhotos.find((p) => p.ics?.status === "PROCESSING")?.ics;
+    if (processing) return processing;
+
+    const queued = formattedPhotos.find((p) => p.ics?.status === "QUEUED")?.ics;
+    if (queued) return queued;
+
+    const failed = formattedPhotos.find(
+      (p) => p.ics?.status === "FAILED" || p.ics?.status === "ERROR"
+    )?.ics;
+    if (failed) return failed;
+
+    return this.buildPendingPlaceholder("NOT_REQUESTED");
+  }
+
   getServiceInfo() {
     const externalUrl = process.env.ICS_SERVICE_URL?.trim();
     return {

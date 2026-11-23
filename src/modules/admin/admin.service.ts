@@ -8,6 +8,7 @@ import { runWithConcurrency } from "../../common/utils/async.utils";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { TokenPayload } from "../auth/jwt.utils";
 import { AiVisionService } from "../vision/ai-vision.service";
+import { IcsService } from "../vision/ics.service";
 import { PhotoRecalibrationService } from "../vision/photo-recalibration.service";
 import { StorageService } from "../vision/storage.service";
 
@@ -17,11 +18,12 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly aiVision: AiVisionService,
-    private readonly photoRecalibration: PhotoRecalibrationService
+    private readonly photoRecalibration: PhotoRecalibrationService,
+    private readonly icsService: IcsService
   ) {}
 
-  listAnimals() {
-    return this.prisma.animal.findMany({
+  async listAnimals() {
+    const animals = await this.prisma.animal.findMany({
       include: {
         photos: {
           select: {
@@ -34,6 +36,10 @@ export class AdminService {
             icsClassification: true,
             slaughterReady: true,
             slaughterStatus: true,
+            slaughterReason: true,
+            morphologicalFeatures: true,
+            contourPoints: true,
+            aiModelVersion: true,
             evaluatedAt: true,
             createdAt: true,
           },
@@ -42,6 +48,18 @@ export class AdminService {
         owner: { select: { id: true, name: true, email: true } },
       },
       orderBy: { createdAt: "desc" },
+    });
+
+    return animals.map((animal) => {
+      const photos = (animal.photos || []).map((p) => ({
+        ...p,
+        ics: this.icsService.formatPhotoRecordIcs(p),
+      }));
+      return {
+        ...animal,
+        ics: this.icsService.summarizeAnimalIcs(photos),
+        photos,
+      };
     });
   }
 

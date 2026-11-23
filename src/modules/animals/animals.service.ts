@@ -9,7 +9,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { isValidTag, normalizeTag, parseOptionalCoordinate } from "../../common/utils/animal.utils";
 import type { TokenPayload } from "../auth/jwt.utils";
 import { AiVisionService } from "../vision/ai-vision.service";
-import { IcsEvaluationResult, IcsService, getIcsClassification } from "../vision/ics.service";
+import { IcsEvaluationResult, IcsService } from "../vision/ics.service";
 import { PhotoRecalibrationService } from "../vision/photo-recalibration.service";
 import { StorageService } from "../vision/storage.service";
 import { CustodyService } from "./custody.service";
@@ -61,49 +61,7 @@ export class AnimalsService {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private formatPhotoIcs(p: any): IcsEvaluationResult {
-    if (p?.icsStatus === "CALCULATED" && typeof p.icsScore === "number") {
-      const slaughterReady =
-        typeof p.slaughterReady === "boolean" ? p.slaughterReady : null;
-      return {
-        aiAvailable: true,
-        status: "CALCULATED",
-        score: p.icsScore,
-        scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
-        classification: p.icsClassification || getIcsClassification(p.icsScore),
-        slaughterReady,
-        slaughterStatus: p.slaughterStatus || "IN_DEVELOPMENT",
-        slaughterLabel:
-          slaughterReady === true
-            ? "Apto para abate"
-            : slaughterReady === false
-            ? "Ainda não apto"
-            : "Em desenvolvimento",
-        slaughterReason: p.slaughterReason || "Avaliado pelo modelo neural.",
-        morphologicalFeatures: p.morphologicalFeatures ?? null,
-        contourPoints: Array.isArray(p.contourPoints) ? p.contourPoints : null,
-        aiModelVersion: p.aiModelVersion ?? null,
-        message: "Avaliação de ICS calculada.",
-        source: "internal-backend",
-        estimatedAt: p.evaluatedAt
-          ? new Date(p.evaluatedAt).toISOString()
-          : new Date(p.createdAt || Date.now()).toISOString(),
-      };
-    }
-
-    if (p?.icsStatus === "QUEUED") {
-      return this.icsService.buildPendingPlaceholder("QUEUED");
-    }
-    if (p?.icsStatus === "PROCESSING") {
-      return this.icsService.buildPendingPlaceholder("PROCESSING");
-    }
-    if (p?.icsStatus === "FAILED" || p?.icsStatus === "ERROR") {
-      return this.icsService.buildPendingPlaceholder(
-        p.icsStatus,
-        p?.slaughterReason || undefined
-      );
-    }
-
-    return this.icsService.buildPendingPlaceholder("NOT_REQUESTED");
+    return this.icsService.formatPhotoRecordIcs(p);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -115,30 +73,9 @@ export class AnimalsService {
       ics: this.formatPhotoIcs(p),
     }));
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const latestCalculated = photos.find((p: any) => p.ics?.status === "CALCULATED");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const processingPhoto = photos.find((p: any) => p.ics?.status === "PROCESSING");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const queuedPhoto = photos.find((p: any) => p.ics?.status === "QUEUED");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const failedPhoto = photos.find(
-      (p: any) => p.ics?.status === "FAILED" || p.ics?.status === "ERROR"
-    );
-
-    const animalIcs = latestCalculated
-      ? latestCalculated.ics
-      : processingPhoto
-        ? processingPhoto.ics
-        : queuedPhoto
-          ? queuedPhoto.ics
-          : failedPhoto
-            ? failedPhoto.ics
-            : this.icsService.buildPendingPlaceholder("NOT_REQUESTED");
-
     return {
       ...animal,
-      ics: animalIcs,
+      ics: this.icsService.summarizeAnimalIcs(photos),
       photos,
     };
   }
