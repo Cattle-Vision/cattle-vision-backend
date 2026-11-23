@@ -191,7 +191,8 @@ export class PhotosService {
     const aiScore = hasValidatedClientScore
       ? Math.round(parsedClientScore * 10) / 10
       : (await this.aiVision.analyzeRearImage(optimizedBuffer)).score;
-    const ics = await this.icsService.evaluateIcsFromBuffer(optimizedBuffer);
+    // O modelo YOLO26m de ICS (~78 MB) roda sob demanda via fila persistente para manter o upload ágil em campo.
+    const ics = this.icsService.buildPendingPlaceholder("NOT_REQUESTED");
 
     const photo = await this.prisma.photo.create({
       data: {

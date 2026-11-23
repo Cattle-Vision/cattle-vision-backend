@@ -1,10 +1,13 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
   HttpCode,
   HttpStatus,
+  Param,
   Post,
+  Query,
   Req,
   UploadedFile,
   UseGuards,
@@ -13,12 +16,18 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Request } from "express";
 import { memoryStorage } from "multer";
+import { CurrentUser } from "../auth/current-user.decorator";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import type { TokenPayload } from "../auth/jwt.utils";
+import { IcsQueueService } from "./ics-queue.service";
 import { IcsService } from "./ics.service";
 
 @Controller("ics")
 export class IcsController {
-  constructor(private readonly icsService: IcsService) {}
+  constructor(
+    private readonly icsService: IcsService,
+    private readonly icsQueue: IcsQueueService
+  ) {}
 
   @Get()
   getStatus() {
@@ -39,16 +48,45 @@ export class IcsController {
       return this.icsService.evaluateIcsFromBuffer(file.buffer);
     }
 
-    // Se a requisição vier como JSON ({ photoId, animalId }), retorna explicitamente
-    // que o modelo neural ainda não está em execução sem tentar inferência simulada.
-    if (req?.is("application/json")) {
-      return this.icsService.buildDevelopmentPlaceholder();
-    }
-
     if (Buffer.isBuffer(req?.body) && req.body.byteLength >= 256) {
       return this.icsService.evaluateIcsFromBuffer(req.body);
     }
 
-    throw new BadRequestException("Envie um frame de imagem válido ou JSON com photoId/animalId.");
+    throw new BadRequestException("Envie um arquivo de imagem válido para avaliar o ICS.");
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post("queue/photo/:photoId")
+  @HttpCode(HttpStatus.OK)
+  enqueuePhoto(
+    @Param("photoId") photoId: string,
+    @CurrentUser() user: TokenPayload,
+    @Body() body?: { force?: boolean }
+  ) {
+    return this.icsQueue.enqueuePhoto(photoId, user, { force: Boolean(body?.force) });
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post("queue/animal/:animalId")
+  @HttpCode(HttpStatus.OK)
+  enqueueAnimal(
+    @Param("animalId") animalId: string,
+    @CurrentUser() user: TokenPayload,
+    @Body() body?: { force?: boolean }
+  ) {
+    return this.icsQueue.enqueueAnimal(animalId, user, { force: Boolean(body?.force) });
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get("queue/status")
+  getQueueStatus(@Query("animalId") animalId?: string) {
+    return this.icsQueue.getQueueStatus(animalId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post("queue/process")
+  @HttpCode(HttpStatus.OK)
+  processNext() {
+    return this.icsQueue.processNextJob();
   }
 }

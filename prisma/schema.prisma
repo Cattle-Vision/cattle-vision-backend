@@ -42,6 +42,7 @@ model Animal {
   ownerId            Int
   owner              User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   photos             Photo[]
+  icsJobs            IcsJob[]
   collaborators      AnimalCollaborator[]
   vaccines           VaccineRecord[]
   diseases           DiseaseRecord[]
@@ -88,10 +89,34 @@ model Photo {
   contourPoints         Json?
   aiModelVersion        String?
   evaluatedAt           DateTime?
+  icsJobs               IcsJob[]
   createdAt             DateTime  @default(now())
 
   @@index([animalId])
   @@index([animalId, createdAt])
+}
+
+/// Fila persistente para execução assíncrona e serializada da IA de ICS (`YOLO26m`)
+model IcsJob {
+  id            String    @id @default(cuid())
+  photoId       String
+  photo         Photo     @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  animalId      String
+  animal        Animal    @relation(fields: [animalId], references: [id], onDelete: Cascade)
+  requestedById Int?
+  /// QUEUED | PROCESSING | COMPLETED | FAILED
+  status        String    @default("QUEUED")
+  priority      Int       @default(0)
+  attempts      Int       @default(0)
+  error         String?
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  @@index([status, priority, createdAt])
+  @@index([photoId, status])
+  @@index([animalId, status])
 }
 
 model VaccineRecord {

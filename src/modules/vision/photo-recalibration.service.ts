@@ -61,28 +61,13 @@ export class PhotoRecalibrationService {
     }
 
     const analysis = await this.aiVision.analyzeRearImage(photoData.buffer);
-    const ics = await this.icsService.evaluateIcsFromBuffer(photoData.buffer);
 
+    // Recalibração atualiza apenas o score de enquadramento anatômico (framing) para não
+    // sobrescrever ou descartar um ICS já calculado pelo modelo YOLO26m.
     const updated = await this.prisma.photo.update({
       where: { id: photo.id },
       data: {
         score: analysis.score,
-        icsStatus: ics.status,
-        icsScore: ics.score,
-        icsClassification: ics.classification,
-        slaughterReady: ics.slaughterReady,
-        slaughterStatus: ics.slaughterStatus,
-        slaughterReason: ics.slaughterReason,
-        morphologicalFeatures:
-          ics.morphologicalFeatures !== null
-            ? (ics.morphologicalFeatures as Prisma.InputJsonValue)
-            : Prisma.JsonNull,
-        contourPoints:
-          ics.contourPoints !== null
-            ? (ics.contourPoints as Prisma.InputJsonValue)
-            : Prisma.JsonNull,
-        aiModelVersion: ics.aiModelVersion,
-        evaluatedAt: ics.status === "CALCULATED" ? new Date(ics.estimatedAt) : null,
       },
       select: {
         id: true,
@@ -95,9 +80,38 @@ export class PhotoRecalibrationService {
         slaughterReady: true,
         slaughterStatus: true,
         slaughterReason: true,
+        aiModelVersion: true,
+        evaluatedAt: true,
         createdAt: true,
       },
     });
+
+    const ics: IcsEvaluationResult =
+      updated.icsStatus === "CALCULATED" && typeof updated.icsScore === "number"
+        ? {
+            aiAvailable: true,
+            status: "CALCULATED",
+            score: updated.icsScore,
+            scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
+            classification: updated.icsClassification || "Calculado",
+            slaughterReady: updated.slaughterReady,
+            slaughterStatus:
+              (updated.slaughterStatus as IcsEvaluationResult["slaughterStatus"]) ||
+              (updated.slaughterReady ? "READY" : "NOT_READY"),
+            slaughterLabel: updated.slaughterReady ? "Apto (cobertura ≥ 3,25)" : "Ainda não apto",
+            slaughterReason:
+              updated.slaughterReason || "ICS preservado após recalibração de enquadramento.",
+            morphologicalFeatures: null,
+            contourPoints: null,
+            aiModelVersion: updated.aiModelVersion,
+            message: "ICS calculado.",
+            source: "internal-backend",
+            estimatedAt: (updated.evaluatedAt || updated.createdAt).toISOString(),
+          }
+        : this.icsService.buildPendingPlaceholder(
+            (updated.icsStatus as IcsEvaluationResult["status"]) || "NOT_REQUESTED",
+            updated.slaughterReason || undefined
+          );
 
     return {
       updated: {

@@ -16,12 +16,16 @@ import { AdminGuard } from "../auth/admin.guard";
 import { CurrentUser } from "../auth/current-user.decorator";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import type { TokenPayload } from "../auth/jwt.utils";
+import { IcsQueueService } from "../vision/ics-queue.service";
 import { AdminService } from "./admin.service";
 
 @UseGuards(JwtAuthGuard, AdminGuard)
 @Controller()
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly icsQueue: IcsQueueService
+  ) {}
 
   @Get("admin")
   getStatus() {
@@ -60,6 +64,18 @@ export class AdminController {
   @HttpCode(HttpStatus.OK)
   recalibrateAll() {
     return this.adminService.recalibrateAll();
+  }
+
+  @Post("admin/ics/regenerate")
+  @HttpCode(HttpStatus.OK)
+  regenerateIcs(
+    @CurrentUser() caller: TokenPayload,
+    @Body() body?: { animalId?: string; onlyMissing?: boolean }
+  ) {
+    return this.icsQueue.enqueueAdminRegenerate(caller, {
+      animalId: body?.animalId,
+      onlyMissing: body?.onlyMissing,
+    });
   }
 
   @Post("admin/users")

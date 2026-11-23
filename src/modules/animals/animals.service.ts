@@ -90,7 +90,20 @@ export class AnimalsService {
       };
     }
 
-    return this.icsService.buildDevelopmentPlaceholder();
+    if (p?.icsStatus === "QUEUED") {
+      return this.icsService.buildPendingPlaceholder("QUEUED");
+    }
+    if (p?.icsStatus === "PROCESSING") {
+      return this.icsService.buildPendingPlaceholder("PROCESSING");
+    }
+    if (p?.icsStatus === "FAILED" || p?.icsStatus === "ERROR") {
+      return this.icsService.buildPendingPlaceholder(
+        p.icsStatus,
+        p?.slaughterReason || undefined
+      );
+    }
+
+    return this.icsService.buildPendingPlaceholder("NOT_REQUESTED");
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -104,9 +117,24 @@ export class AnimalsService {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const latestCalculated = photos.find((p: any) => p.ics?.status === "CALCULATED");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const processingPhoto = photos.find((p: any) => p.ics?.status === "PROCESSING");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const queuedPhoto = photos.find((p: any) => p.ics?.status === "QUEUED");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const failedPhoto = photos.find(
+      (p: any) => p.ics?.status === "FAILED" || p.ics?.status === "ERROR"
+    );
+
     const animalIcs = latestCalculated
       ? latestCalculated.ics
-      : this.icsService.buildDevelopmentPlaceholder();
+      : processingPhoto
+        ? processingPhoto.ics
+        : queuedPhoto
+          ? queuedPhoto.ics
+          : failedPhoto
+            ? failedPhoto.ics
+            : this.icsService.buildPendingPlaceholder("NOT_REQUESTED");
 
     return {
       ...animal,

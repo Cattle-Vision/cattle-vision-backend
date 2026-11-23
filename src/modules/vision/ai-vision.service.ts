@@ -1,5 +1,7 @@
 import { Injectable } from "@nestjs/common";
+import { get } from "@vercel/blob";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import type sharp from "sharp";
 
@@ -42,11 +44,30 @@ interface RectBox {
   y2: number;
 }
 
-interface GuardEvaluation {
+export interface GuardEvaluation {
   rejectedReason?: "human-detected" | "non-bovine-detected";
   feedback?: string;
   cappedScore?: number;
 }
+
+export interface IcsDetectionOutput {
+  detected: boolean;
+  score: number | null;
+  classIndex: number | null;
+  classLabel: string | null;
+  confidence: number;
+  box: NormalizedBox | null;
+  contourPoints: Array<{ x: number; y: number }> | null;
+  classProbabilities: Record<string, number> | null;
+  modelVersion: string;
+}
+
+const ICS_INFERENCE_SIZE = 640;
+const ICS_CLASS_LABELS = ["3.25", "3.5", "3.75", "4.0", "4.25"] as const;
+const ICS_CLASS_SCORES = [3.25, 3.5, 3.75, 4.0, 4.25] as const;
+const ICS_MODEL_VERSION = "yolo26m-ics-v1";
+const DEFAULT_ICS_BLOB_URL =
+  "https://zpzh2ryvhf5e0iyd.private.blob.vercel-storage.com/models/ics_yolo26m.onnx";
 
 /**
  * Resolução nativa exportada no modelo `identifier.onnx` (imgsz=[512, 512]).
@@ -106,10 +127,14 @@ export class AiVisionService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private cocoSession: any | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private icsSession: any | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private ortModule: any | null = null;
   private sessionLoadAttempted = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private modelInitPromise: Promise<{ session: any; ort: any } | null> | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private icsInitPromise: Promise<{ session: any; ort: any } | null> | null = null;
   private sharpLoader: typeof sharp | null = null;
   /** Fila mutex para garantir inferência ONNX estritamente sequencial (1 imagem por vez). */
   private inferenceQueue: Promise<void> = Promise.resolve();
@@ -852,6 +877,301 @@ export class AiVisionService {
         console.error("[AI] Erro na inferência ONNX, usando fallback óptico dinâmico:", err);
         return this.fallbackVisionScore(imageBuffer);
       }
+    });
+  }
+
+  /**
+   * Resolve ou baixa (para `/tmp/ics_yolo26m.onnx`) o modelo `YOLO26m` FP32 de ICS
+   * armazenado no Vercel Private Blob, mantendo a função serverless enxuta (<250MB).
+   */
+  private async resolveOrDownloadIcsModelPath(): Promise<string | null> {
+    const envPath = process.env.ICS_MODEL_PATH?.trim();
+    const tmpPath = path.join(os.tmpdir(), "ics_yolo26m.onnx");
+    const localCandidates = [
+      ...(envPath ? [envPath] : []),
+      this.resolveModelFile("ics_yolo26m.onnx"),
+      tmpPath,
+    ].filter((p): p is string => Boolean(p));
+
+    for (const candidate of localCandidates) {
+      try {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).size > 1_000_000) {
+          return candidate;
+        }
+      } catch {
+        // segue para o próximo caminho
+      }
+    }
+
+    const blobUrl = process.env.ICS_MODEL_URL?.trim() || DEFAULT_ICS_BLOB_URL;
+    const blobToken = process.env.BLOB_READ_WRITE_TOKEN?.trim();
+
+    try {
+      let modelBuffer: Buffer | null = null;
+
+      if (blobToken) {
+        try {
+          const blobRes = await get(blobUrl, {
+            access: "private",
+            token: blobToken,
+          });
+          if (blobRes && blobRes.statusCode === 200 && blobRes.stream) {
+            const arr = await new Response(
+              blobRes.stream as unknown as ReadableStream
+            ).arrayBuffer();
+            modelBuffer = Buffer.from(arr);
+          }
+        } catch (err) {
+          console.warn("[ICS-AI] Falha ao ler Blob via SDK privado:", (err as Error).message);
+        }
+      }
+
+      if (!modelBuffer) {
+        const headers: Record<string, string> = {};
+        if (blobToken) {
+          headers.Authorization = `Bearer ${blobToken}`;
+        }
+        const res = await fetch(blobUrl, { headers });
+        if (res.ok) {
+          modelBuffer = Buffer.from(await res.arrayBuffer());
+        }
+      }
+
+      if (modelBuffer && modelBuffer.byteLength > 1_000_000) {
+        const tempWritePath = `${tmpPath}.${Date.now()}.tmp`;
+        fs.writeFileSync(tempWritePath, modelBuffer);
+        fs.renameSync(tempWritePath, tmpPath);
+        console.log(
+          `[ICS-AI] Modelo ics_yolo26m.onnx baixado e cacheado em ${tmpPath} (${Math.round(
+            modelBuffer.byteLength / (1024 * 1024)
+          )} MB).`
+        );
+        return tmpPath;
+      }
+    } catch (err) {
+      console.error("[ICS-AI] Erro ao obter modelo ICS do Blob:", (err as Error).message);
+    }
+
+    return null;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async initIcsModel(): Promise<{ session: any; ort: any } | null> {
+    if (this.icsSession && this.ortModule) {
+      return { session: this.icsSession, ort: this.ortModule };
+    }
+    if (this.icsInitPromise) {
+      return this.icsInitPromise;
+    }
+
+    this.icsInitPromise = (async () => {
+      if (process.platform === "linux") {
+        const candidateDirs = [
+          path.resolve(process.cwd(), "node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
+          path.resolve(__dirname, "../../../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
+          path.resolve(__dirname, "../../../../node_modules/onnxruntime-node/bin/napi-v6/linux/x64"),
+        ];
+        for (const dir of candidateDirs) {
+          if (fs.existsSync(dir)) {
+            const currentLd = process.env.LD_LIBRARY_PATH || "";
+            if (!currentLd.includes(dir)) {
+              process.env.LD_LIBRARY_PATH = currentLd ? `${dir}:${currentLd}` : dir;
+            }
+            break;
+          }
+        }
+      }
+
+      const modelPath = await this.resolveOrDownloadIcsModelPath();
+      if (!modelPath) {
+        return null;
+      }
+
+      try {
+        const ort = this.ortModule || (await import("onnxruntime-node"));
+        this.ortModule = ort;
+        this.icsSession = await ort.InferenceSession.create(modelPath, {
+          logSeverityLevel: 3,
+        });
+        console.log("[ICS-AI] Sessão ONNX YOLO26m ICS inicializada com sucesso.");
+        return { session: this.icsSession, ort };
+      } catch (err) {
+        console.error("[ICS-AI] Falha ao inicializar sessão ONNX ICS:", err);
+        return null;
+      } finally {
+        this.icsInitPromise = null;
+      }
+    })();
+
+    return this.icsInitPromise;
+  }
+
+  /**
+   * Executa inferência do modelo `YOLO26m` (`[1, 3, 640, 640]` -> `[1, 9, 8400]`)
+   * para classificar o ICS corporal (`3.25`, `3.5`, `3.75`, `4.0`, `4.25`) exclusivamente no backend.
+   */
+  async analyzeIcsImage(imageBuffer: Buffer): Promise<IcsDetectionOutput> {
+    return this.enqueueInference(async () => {
+      const loaded = await this.initIcsModel();
+      if (!loaded) {
+        throw new Error("Modelo ONNX de ICS (ics_yolo26m.onnx) indisponível no servidor.");
+      }
+
+      const { session: sess, ort } = loaded;
+      const sharpFn = await this.getSharp();
+      const normalized = await sharpFn(imageBuffer)
+        .rotate()
+        .removeAlpha()
+        .toColorspace("srgb")
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const baseRgb: NormalizedRgbImage = {
+        data: normalized.data,
+        width: normalized.info.width,
+        height: normalized.info.height,
+      };
+
+      const { float32Data, scaledW, scaledH, padX, padY } =
+        await this.prepareLetterboxTensor(baseRgb, ICS_INFERENCE_SIZE);
+
+      const inputName = sess.inputNames?.[0] || "images";
+      const results = await sess.run({
+        [inputName]: new ort.Tensor("float32", float32Data, [
+          1,
+          3,
+          ICS_INFERENCE_SIZE,
+          ICS_INFERENCE_SIZE,
+        ]),
+      });
+
+      const outputName = sess.outputNames?.[0] || Object.keys(results)[0];
+      const outputTensor = results[outputName];
+      const outputData = outputTensor.data as Float32Array;
+      const numAnchors = outputTensor.dims?.[2] || Math.floor(outputData.length / 9);
+
+      interface Candidate {
+        idx: number;
+        cls: number;
+        conf: number;
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+        cx: number;
+        cy: number;
+        w: number;
+        h: number;
+      }
+
+      const candidates: Candidate[] = [];
+      for (let i = 0; i < numAnchors; i++) {
+        let bestCls = 0;
+        let bestConf = 0;
+        for (let c = 0; c < ICS_CLASS_LABELS.length; c++) {
+          const score = outputData[(4 + c) * numAnchors + i];
+          if (score > bestConf) {
+            bestConf = score;
+            bestCls = c;
+          }
+        }
+        if (bestConf < 0.15) continue;
+
+        const cx = outputData[i];
+        const cy = outputData[numAnchors + i];
+        const w = outputData[2 * numAnchors + i];
+        const h = outputData[3 * numAnchors + i];
+        if (!Number.isFinite(w) || !Number.isFinite(h) || w < MIN_BOX_DIM_PX || h < MIN_BOX_DIM_PX) {
+          continue;
+        }
+
+        candidates.push({
+          idx: i,
+          cls: bestCls,
+          conf: bestConf,
+          x1: cx - w / 2,
+          y1: cy - h / 2,
+          x2: cx + w / 2,
+          y2: cy + h / 2,
+          cx,
+          cy,
+          w,
+          h,
+        });
+      }
+
+      candidates.sort((a, b) => b.conf - a.conf);
+      const kept: Candidate[] = [];
+      for (const cand of candidates) {
+        let suppressed = false;
+        for (const k of kept) {
+          const ix1 = Math.max(cand.x1, k.x1);
+          const iy1 = Math.max(cand.y1, k.y1);
+          const ix2 = Math.min(cand.x2, k.x2);
+          const iy2 = Math.min(cand.y2, k.y2);
+          const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+          const union =
+            (cand.x2 - cand.x1) * (cand.y2 - cand.y1) +
+            (k.x2 - k.x1) * (k.y2 - k.y1) -
+            inter;
+          if (union > 0 && inter / union > 0.45) {
+            suppressed = true;
+            break;
+          }
+        }
+        if (!suppressed) {
+          kept.push(cand);
+          break; // Maior confiança pós-NMS representa o bovino principal enquadrado
+        }
+      }
+
+      const winner = kept[0];
+      if (!winner) {
+        return {
+          detected: false,
+          score: null,
+          classIndex: null,
+          classLabel: null,
+          confidence: 0,
+          box: null,
+          contourPoints: null,
+          classProbabilities: null,
+          modelVersion: ICS_MODEL_VERSION,
+        };
+      }
+
+      const normCx = Math.max(0, Math.min(1, (winner.cx - padX) / Math.max(1, scaledW)));
+      const normCy = Math.max(0, Math.min(1, (winner.cy - padY) / Math.max(1, scaledH)));
+      const normW = Math.max(0, Math.min(1, winner.w / Math.max(1, scaledW)));
+      const normH = Math.max(0, Math.min(1, winner.h / Math.max(1, scaledH)));
+
+      const x1 = Math.max(0, Math.min(1, normCx - normW / 2));
+      const y1 = Math.max(0, Math.min(1, normCy - normH / 2));
+      const x2 = Math.max(0, Math.min(1, normCx + normW / 2));
+      const y2 = Math.max(0, Math.min(1, normCy + normH / 2));
+
+      const classProbabilities: Record<string, number> = {};
+      for (let c = 0; c < ICS_CLASS_LABELS.length; c++) {
+        classProbabilities[ICS_CLASS_LABELS[c]] =
+          Math.round(outputData[(4 + c) * numAnchors + winner.idx] * 10000) / 10000;
+      }
+
+      return {
+        detected: true,
+        score: ICS_CLASS_SCORES[winner.cls],
+        classIndex: winner.cls,
+        classLabel: ICS_CLASS_LABELS[winner.cls],
+        confidence: Math.round(winner.conf * 10000) / 10000,
+        box: { cx: normCx, cy: normCy, w: normW, h: normH },
+        contourPoints: [
+          { x: x1, y: y1 },
+          { x: x2, y: y1 },
+          { x: x2, y: y2 },
+          { x: x1, y: y2 },
+        ],
+        classProbabilities,
+        modelVersion: ICS_MODEL_VERSION,
+      };
     });
   }
 }

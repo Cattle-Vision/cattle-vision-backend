@@ -1,6 +1,14 @@
 import { Injectable } from "@nestjs/common";
+import { AiVisionService } from "./ai-vision.service";
 
-export type IcsStatus = "IN_DEVELOPMENT" | "CALCULATED" | "ERROR";
+export type IcsStatus =
+  | "IN_DEVELOPMENT"
+  | "NOT_REQUESTED"
+  | "QUEUED"
+  | "PROCESSING"
+  | "CALCULATED"
+  | "FAILED"
+  | "ERROR";
 export type SlaughterStatus = "IN_DEVELOPMENT" | "READY" | "NOT_READY";
 
 export interface IcsEvaluationResult {
@@ -24,7 +32,7 @@ export interface IcsEvaluationResult {
 
 export function getIcsClassification(score: number | null | undefined): string {
   if (score === null || score === undefined || !Number.isFinite(score)) {
-    return "Em desenvolvimento";
+    return "Não calculado";
   }
 
   if (score < 2.0) return "Muito Magro (Caquético)";
@@ -35,61 +43,91 @@ export function getIcsClassification(score: number | null | undefined): string {
 }
 
 /**
- * Serviço de Avaliação de ICS, Contorno Corporal e Aptidão para Abate (`src/modules/vision/ics.service.ts`).
+ * Serviço de Avaliação de ICS Corporal via YOLO26m ONNX (`src/modules/vision/ics.service.ts`).
  *
- * Diretriz crítica:
- * - O modelo neural de ICS, contorno e aptidão para abate ainda não existe e NÃO deve simular notas.
- * - Enquanto `ICS_SERVICE_URL` não estiver configurado/disponível, retorna contrato estruturado
- *   explícito com `aiAvailable: false` e `status: "IN_DEVELOPMENT"` para aviso transparente ao usuário.
+ * Executa exclusivamente no backend (Vercel Serverless / Node):
+ * - Suporta microserviço externo opcional via `ICS_SERVICE_URL`.
+ * - Caso não definido, executa `ics_yolo26m.onnx` (convertido de `YOLO26_VACAS_MEDIO.pt`)
+ *   via `AiVisionService.analyzeIcsImage`.
  */
 @Injectable()
 export class IcsService {
-  buildDevelopmentPlaceholder(): IcsEvaluationResult {
+  constructor(private readonly aiVision: AiVisionService) {}
+
+  buildPendingPlaceholder(status: IcsStatus = "NOT_REQUESTED", customMessage?: string): IcsEvaluationResult {
+    const labelByStatus: Record<string, string> = {
+      QUEUED: "Na fila de processamento",
+      PROCESSING: "Processando IA de ICS...",
+      FAILED: "Falha / Não identificado",
+      ERROR: "Falha / Não identificado",
+      NOT_REQUESTED: "Aguardando solicitação",
+      IN_DEVELOPMENT: "Aguardando solicitação",
+    };
+
+    const msgByStatus: Record<string, string> = {
+      QUEUED: "Foto enfileirada no servidor aguardando execução do modelo YOLO26m ICS.",
+      PROCESSING: "Servidor executando inferência YOLO26m ONNX para esta captura.",
+      FAILED: customMessage || "Não foi possível calcular o ICS desta foto.",
+      ERROR: customMessage || "Não foi possível calcular o ICS desta foto.",
+      NOT_REQUESTED: "Clique em 'Solicitar ICS' para enviar esta foto à fila do servidor.",
+      IN_DEVELOPMENT: "Clique em 'Solicitar ICS' para processar esta captura com o modelo YOLO26m.",
+    };
+
     return {
-      aiAvailable: false,
-      status: "IN_DEVELOPMENT",
+      aiAvailable: true,
+      status,
       score: null,
       scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
-      classification: "Em desenvolvimento",
+      classification: labelByStatus[status] || "Aguardando solicitação",
       slaughterReady: null,
       slaughterStatus: "IN_DEVELOPMENT",
-      slaughterLabel: "Em desenvolvimento",
-      slaughterReason:
-        "Modelo neural de avaliação corporal e aptidão para abate ainda não implementado.",
+      slaughterLabel: labelByStatus[status] || "Aguardando cálculo",
+      slaughterReason: msgByStatus[status] || "Solicite o cálculo de ICS para avaliar.",
       morphologicalFeatures: null,
       contourPoints: null,
       aiModelVersion: null,
-      message:
-        "IA de avaliação de ICS ainda em desenvolvimento (modelo neural não disponível para execução).",
-      source: "development-placeholder",
+      message: msgByStatus[status] || "Solicite a geração do ICS para processar na fila.",
+      source: "internal-backend",
       estimatedAt: new Date().toISOString(),
     };
+  }
+
+  /** Mantido por compatibilidade com chamadas legadas que esperam um slot pendente. */
+  buildDevelopmentPlaceholder(): IcsEvaluationResult {
+    return this.buildPendingPlaceholder("NOT_REQUESTED");
   }
 
   getServiceInfo() {
     const externalUrl = process.env.ICS_SERVICE_URL?.trim();
     return {
-      status: "in_development",
-      aiAvailable: Boolean(externalUrl),
-      modelStatus: externalUrl ? "EXTERNAL_CONFIGURED" : "IN_DEVELOPMENT",
+      status: "active",
+      aiAvailable: true,
+      modelStatus: externalUrl ? "EXTERNAL_CONFIGURED" : "ACTIVE",
+      queueEnabled: true,
+      modelVersion: "yolo26m-ics-v1",
+      classes: ["3.25", "3.5", "3.75", "4.0", "4.25"],
       scale: "1.0 - 5.0",
       notice:
-        "A IA de avaliação de ICS, contorno corporal e aptidão para abate ainda está em desenvolvimento e não está em execução.",
+        "IA de avaliação de ICS (YOLO26m ONNX) ativa exclusivamente no backend, operando com fila persistente.",
       architecture: {
-        mode: externalUrl ? "external_microservice" : "development_placeholder",
+        mode: externalUrl ? "external_microservice" : "internal_backend_onnx",
         externalConfigured: Boolean(externalUrl),
-        modelStatus: "IN_DEVELOPMENT",
+        modelStatus: "ACTIVE",
       },
-      description: "Serviço de Diagnóstico de Índice de Condição Corporal (ICS) e Abate Bovino",
-      version: "1.1.0",
+      description: "Serviço de Diagnóstico de Índice de Condição Corporal (ICS) Bovino (YOLO26m)",
+      version: "2.0.0",
     };
   }
 
   async evaluateIcsFromBuffer(imageBuffer?: Buffer): Promise<IcsEvaluationResult> {
+    if (!imageBuffer || imageBuffer.byteLength === 0) {
+      return this.buildPendingPlaceholder("ERROR", "Buffer de imagem ausente para análise de ICS.");
+    }
+
     const externalUrl = process.env.ICS_SERVICE_URL?.trim();
     const apiToken = process.env.ICS_API_TOKEN?.trim();
 
-    if (externalUrl && imageBuffer && imageBuffer.byteLength > 0) {
+    if (externalUrl) {
       try {
         const endpoint = `${externalUrl.replace(/\/$/, "")}/evaluate`;
         const headers: Record<string, string> = {
@@ -112,15 +150,10 @@ export class IcsService {
         if (res.ok) {
           const data = await res.json();
           if (typeof data.score === "number") {
-            const score = Math.round(data.score * 10) / 10;
+            const score = Math.round(data.score * 100) / 100;
             const slaughterReady =
-              typeof data.slaughterReady === "boolean" ? data.slaughterReady : null;
-            const slaughterStatus: SlaughterStatus =
-              slaughterReady === true
-                ? "READY"
-                : slaughterReady === false
-                ? "NOT_READY"
-                : "IN_DEVELOPMENT";
+              typeof data.slaughterReady === "boolean" ? data.slaughterReady : score >= 3.25;
+            const slaughterStatus: SlaughterStatus = slaughterReady ? "READY" : "NOT_READY";
 
             return {
               aiAvailable: true,
@@ -130,12 +163,7 @@ export class IcsService {
               classification: data.classification || getIcsClassification(score),
               slaughterReady,
               slaughterStatus,
-              slaughterLabel:
-                slaughterReady === true
-                  ? "Apto para abate"
-                  : slaughterReady === false
-                  ? "Ainda não apto"
-                  : "Em desenvolvimento",
+              slaughterLabel: slaughterReady ? "Apto (cobertura ≥ 3,25)" : "Ainda não apto",
               slaughterReason:
                 typeof data.slaughterReason === "string"
                   ? data.slaughterReason
@@ -156,12 +184,79 @@ export class IcsService {
         }
       } catch (err) {
         console.warn(
-          "[ICS] Microserviço externo indisponível, mantendo aviso de desenvolvimento:",
+          "[ICS] Microserviço externo indisponível, seguindo para YOLO26m ONNX interno:",
           (err as Error).message
         );
       }
     }
 
-    return this.buildDevelopmentPlaceholder();
+    try {
+      const det = await this.aiVision.analyzeIcsImage(imageBuffer);
+      if (!det.detected || det.score === null) {
+        return {
+          aiAvailable: true,
+          status: "FAILED",
+          score: null,
+          scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
+          classification: "Não identificado",
+          slaughterReady: null,
+          slaughterStatus: "IN_DEVELOPMENT",
+          slaughterLabel: "Não identificado",
+          slaughterReason:
+            "O modelo YOLO26m não identificou um bovino com confiança mínima (15%) nesta captura.",
+          morphologicalFeatures: null,
+          contourPoints: null,
+          aiModelVersion: det.modelVersion,
+          confidence: 0,
+          message: "Bovino não detectado com confiança suficiente para classificar o ICS.",
+          source: "internal-backend",
+          estimatedAt: new Date().toISOString(),
+        };
+      }
+
+      const score = det.score;
+      const confPct = Math.round(det.confidence * 1000) / 10;
+      const slaughterReady = score >= 3.25;
+
+      const features: Record<string, number> = {
+        confidence: confPct,
+        classIndex: det.classIndex ?? -1,
+      };
+      if (det.box) {
+        features.boxCx = Math.round(det.box.cx * 1000) / 1000;
+        features.boxCy = Math.round(det.box.cy * 1000) / 1000;
+        features.boxW = Math.round(det.box.w * 1000) / 1000;
+        features.boxH = Math.round(det.box.h * 1000) / 1000;
+      }
+      if (det.classProbabilities) {
+        for (const [k, v] of Object.entries(det.classProbabilities)) {
+          features[`prob_${k.replace(".", "_")}`] = Math.round(v * 1000) / 10;
+        }
+      }
+
+      return {
+        aiAvailable: true,
+        status: "CALCULATED",
+        score,
+        scale: "1.0 - 5.0 (Padrão Zootécnico Bovino)",
+        classification: getIcsClassification(score),
+        slaughterReady,
+        slaughterStatus: slaughterReady ? "READY" : "NOT_READY",
+        slaughterLabel: slaughterReady ? "Boa cobertura (ICS ≥ 3,25)" : "Em desenvolvimento corporal",
+        slaughterReason: `Classe ${det.classIndex} (${score.toFixed(2)}) via YOLO26m ONNX (${confPct}% confiança).`,
+        morphologicalFeatures: features,
+        contourPoints: det.contourPoints,
+        aiModelVersion: det.modelVersion,
+        confidence: confPct,
+        message: `ICS ${score.toFixed(2)} (${getIcsClassification(score)}) calculado pelo servidor.`,
+        source: "internal-backend",
+        estimatedAt: new Date().toISOString(),
+      };
+    } catch (err) {
+      return this.buildPendingPlaceholder(
+        "FAILED",
+        `Erro ao executar modelo ICS no servidor: ${(err as Error).message}`
+      );
+    }
   }
 }
