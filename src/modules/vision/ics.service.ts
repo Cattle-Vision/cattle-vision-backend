@@ -65,12 +65,12 @@ export class IcsService {
     };
 
     const msgByStatus: Record<string, string> = {
-      QUEUED: "Foto enfileirada no servidor aguardando execução do modelo YOLO26m ICS.",
-      PROCESSING: "Servidor executando inferência YOLO26m ONNX para esta captura.",
-      FAILED: customMessage || "Não foi possível calcular o ICS desta foto.",
-      ERROR: customMessage || "Não foi possível calcular o ICS desta foto.",
-      NOT_REQUESTED: "Clique em 'Solicitar ICS' para enviar esta foto à fila do servidor.",
-      IN_DEVELOPMENT: "Clique em 'Solicitar ICS' para processar esta captura com o modelo YOLO26m.",
+      QUEUED: "Captura na fila aguardando análise de condição corporal.",
+      PROCESSING: "Analisando a condição corporal desta captura.",
+      FAILED: customMessage || "Não foi possível avaliar o ICS desta captura.",
+      ERROR: customMessage || "Não foi possível avaliar o ICS desta captura.",
+      NOT_REQUESTED: "Solicite a avaliação para calcular o ICS desta captura.",
+      IN_DEVELOPMENT: "Solicite a avaliação para calcular o ICS desta captura.",
     };
 
     return {
@@ -82,11 +82,11 @@ export class IcsService {
       slaughterReady: null,
       slaughterStatus: "IN_DEVELOPMENT",
       slaughterLabel: labelByStatus[status] || "Aguardando cálculo",
-      slaughterReason: msgByStatus[status] || "Solicite o cálculo de ICS para avaliar.",
+      slaughterReason: msgByStatus[status] || "Solicite a avaliação de ICS.",
       morphologicalFeatures: null,
       contourPoints: null,
       aiModelVersion: null,
-      message: msgByStatus[status] || "Solicite a geração do ICS para processar na fila.",
+      message: msgByStatus[status] || "Solicite a avaliação de ICS.",
       source: "internal-backend",
       estimatedAt: new Date().toISOString(),
     };
@@ -116,7 +116,7 @@ export class IcsService {
             : slaughterReady === false
             ? "Ainda não apto"
             : "Aguardando definição",
-        slaughterReason: p.slaughterReason || "Avaliado pelo modelo neural.",
+        slaughterReason: p.slaughterReason || "Avaliação de condição corporal concluída.",
         morphologicalFeatures: p.morphologicalFeatures ?? null,
         contourPoints: Array.isArray(p.contourPoints) ? p.contourPoints : null,
         aiModelVersion: p.aiModelVersion ?? null,
@@ -230,7 +230,7 @@ export class IcsService {
               slaughterReason:
                 typeof data.slaughterReason === "string"
                   ? data.slaughterReason
-                  : "Avaliação realizada via microserviço neural externo.",
+                  : "Avaliação automática concluída.",
               morphologicalFeatures:
                 data.morphologicalFeatures && typeof data.morphologicalFeatures === "object"
                   ? data.morphologicalFeatures
@@ -239,7 +239,7 @@ export class IcsService {
               aiModelVersion:
                 typeof data.aiModelVersion === "string" ? data.aiModelVersion : "external-v1",
               confidence: typeof data.confidence === "number" ? data.confidence : 85,
-              message: data.message || "ICS calculado via microserviço neural externo.",
+              message: data.message || "ICS calculado com sucesso.",
               source: "external-microservice",
               estimatedAt: new Date().toISOString(),
             };
@@ -266,12 +266,12 @@ export class IcsService {
           slaughterStatus: "IN_DEVELOPMENT",
           slaughterLabel: "Não identificado",
           slaughterReason:
-            "O modelo YOLO26m não identificou um bovino com confiança mínima (15%) nesta captura.",
+            "O animal não pôde ser identificado com clareza suficiente nesta imagem.",
           morphologicalFeatures: null,
           contourPoints: null,
           aiModelVersion: det.modelVersion,
           confidence: 0,
-          message: "Bovino não detectado com confiança suficiente para classificar o ICS.",
+          message: "Não foi possível identificar o animal para calcular o ICS.",
           source: "internal-backend",
           estimatedAt: new Date().toISOString(),
         };
@@ -305,13 +305,13 @@ export class IcsService {
         classification: getIcsClassification(score),
         slaughterReady,
         slaughterStatus: slaughterReady ? "READY" : "NOT_READY",
-        slaughterLabel: slaughterReady ? "Boa cobertura (ICS ≥ 3,25)" : "Em desenvolvimento corporal",
-        slaughterReason: `Classe ${det.classIndex} (${score.toFixed(2)}) via YOLO26m ONNX (${confPct}% confiança).`,
+        slaughterLabel: slaughterReady ? "Boa cobertura (ICS ≥ 3,25)" : "Ainda não apto",
+        slaughterReason: `Nota ${score.toFixed(2).replace(".", ",")} · ${getIcsClassification(score)} (${confPct}% de confiança).`,
         morphologicalFeatures: features,
         contourPoints: det.contourPoints,
         aiModelVersion: det.modelVersion,
         confidence: confPct,
-        message: `ICS ${score.toFixed(2)} (${getIcsClassification(score)}) calculado pelo servidor.`,
+        message: `ICS ${score.toFixed(2).replace(".", ",")} (${getIcsClassification(score)}) calculado.`,
         source: "internal-backend",
         estimatedAt: new Date().toISOString(),
       };
