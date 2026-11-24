@@ -1,7 +1,32 @@
 import type { NextFunction, Request, Response } from "express";
-import { track } from "@vercel/analytics/server";
 
 type PrimitiveProp = string | number | boolean | null;
+
+type ServerTrackFn = (
+  eventName: string,
+  properties?: Record<string, PrimitiveProp>,
+  options?: { headers?: Request["headers"] }
+) => Promise<void>;
+
+let cachedTrackPromise: Promise<ServerTrackFn | null> | null = null;
+
+/**
+ * Carrega `@vercel/analytics/server` via `import()` nativo preservado em CommonJS.
+ * Necessário porque a condição `"node"` de `@vercel/analytics/package.json` aponta para `.mjs`,
+ * causando `ERR_REQUIRE_ESM` quando `tsc` (module: commonjs) emite `require(...)`.
+ */
+function getServerTrack(): Promise<ServerTrackFn | null> {
+  if (!cachedTrackPromise) {
+    cachedTrackPromise = (
+      new Function('return import("@vercel/analytics/server")') as () => Promise<{
+        track?: ServerTrackFn;
+      }>
+    )()
+      .then((mod) => (typeof mod?.track === "function" ? mod.track : null))
+      .catch(() => null);
+  }
+  return cachedTrackPromise;
+}
 
 /**
  * Normaliza caminhos da API removendo IDs numéricos/UUID para evitar alta cardinalidade no Vercel Web Analytics.
@@ -49,9 +74,13 @@ export function trackBackendEvent(
   try {
     const safeProps = sanitizeProperties(properties);
     // Usa o requestContext da Vercel (waitUntil) quando disponível, sem atrasar a resposta da API
-    void Promise.resolve(
-      track(eventName.slice(0, 255), safeProps, { headers: req.headers })
-    ).catch(() => {});
+    void getServerTrack()
+      .then((trackFn) =>
+        trackFn
+          ? trackFn(eventName.slice(0, 255), safeProps, { headers: req.headers })
+          : undefined
+      )
+      .catch(() => {});
   } catch {
     // Telemetria nunca pode impactar o fluxo HTTP principal
   }
