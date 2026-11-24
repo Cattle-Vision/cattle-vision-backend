@@ -10,7 +10,12 @@ export class HealthController {
   getRootStatus(): string {
     return `<!doctype html>
 <html lang="pt-BR">
-  <head><meta charset="utf-8"><title>CattleVision API Service (NestJS)</title></head>
+  <head>
+    <meta charset="utf-8">
+    <title>CattleVision API Service (NestJS)</title>
+    <script>window.va=window.va||function(){(window.vaq=window.vaq||[]).push(arguments);};</script>
+    <script defer src="/_vercel/insights/script.js" data-sdkn="@vercel/analytics" data-sdkv="2.0.1"></script>
+  </head>
   <body style="font-family: system-ui, sans-serif; padding: 24px; line-height: 1.5;">
     <h1 style="color: #10B981;">CattleVision API Service (NestJS)</h1>
     <p>Servidor RESTful NestJS + Prisma + YOLOv8 ONNX ativo.</p>

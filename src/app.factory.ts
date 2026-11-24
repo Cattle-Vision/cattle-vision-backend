@@ -5,6 +5,7 @@ import { ExpressAdapter } from "@nestjs/platform-express";
 import express, { Express } from "express";
 import { bootstrapEnv } from "./config/env";
 import { ApiExceptionFilter } from "./common/filters/api-exception.filter";
+import { vercelAnalyticsMiddleware } from "./common/utils/analytics";
 import { AppModule } from "./app.module";
 
 /**
@@ -22,6 +23,7 @@ export async function createConfiguredNestApp(): Promise<{
   const expressApp = express();
   expressApp.use(express.json({ limit: "15mb" }));
   expressApp.use(express.urlencoded({ extended: true, limit: "15mb" }));
+  expressApp.use(vercelAnalyticsMiddleware);
 
   const app = await NestFactory.create(AppModule, new ExpressAdapter(expressApp), {
     bodyParser: false,

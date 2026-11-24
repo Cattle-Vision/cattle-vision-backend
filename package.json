@@ -29,6 +29,7 @@
     "@nestjs/core": "^10.4.22",
     "@nestjs/platform-express": "^10.4.22",
     "@prisma/client": "^5.22.0",
+    "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^2.8.0",
     "adm-zip": "^0.6.1",
     "bcryptjs": "^3.0.3",
