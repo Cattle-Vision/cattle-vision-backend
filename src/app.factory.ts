@@ -24,6 +24,18 @@ export async function createConfiguredNestApp(): Promise<{
   expressApp.use(express.json({ limit: "15mb" }));
   expressApp.use(express.urlencoded({ extended: true, limit: "15mb" }));
   expressApp.use(vercelAnalyticsMiddleware);
+  // Evita cache HTTP intermediário/browser em respostas dinâmicas JSON (mantém cache imutável em GET /api/photos/:id)
+  expressApp.use((req, res, next) => {
+    const rawPath = (req.path || req.url || "").split("?")[0];
+    if (
+      req.method === "GET" &&
+      rawPath.startsWith("/api/") &&
+      !/^\/api\/photos\/[^/]+$/.test(rawPath)
+    ) {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    }
+    next();
+  });
 
   const app = await NestFactory.create(AppModule, new ExpressAdapter(expressApp), {
     bodyParser: false,

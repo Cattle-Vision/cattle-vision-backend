@@ -86,7 +86,7 @@ export class IcsController {
   @UseGuards(JwtAuthGuard)
   @Post("queue/process")
   @HttpCode(HttpStatus.OK)
-  processNext() {
-    return this.icsQueue.processNextJob();
+  processNext(@Body() body?: { animalId?: string }) {
+    return this.icsQueue.processNextJob(body?.animalId);
   }
 }

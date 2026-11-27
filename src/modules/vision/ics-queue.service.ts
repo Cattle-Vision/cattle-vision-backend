@@ -40,7 +40,7 @@ export class IcsQueueService {
     private readonly icsService: IcsService
   ) {}
 
-  private async ensureQueueTable(): Promise<void> {
+  async ensureQueueTable(): Promise<void> {
     if (this.tableEnsured) return;
     try {
       const existing = await this.prisma.$queryRaw<Array<{ reg: string | null }>>`
@@ -411,31 +411,53 @@ export class IcsQueueService {
    * Reivindica atomicamente o próximo job `QUEUED` (via `FOR UPDATE SKIP LOCKED`),
    * executa `YOLO26m` ONNX sobre a imagem original armazenada e atualiza o registro da foto.
    */
-  async processNextJob() {
+  async processNextJob(targetAnimalId?: string) {
     await this.ensureQueueTable();
     await this.recoverStaleJobs();
 
-    const claimed = await this.prisma.$queryRaw<ClaimedIcsJobRow[]>`
-      UPDATE "IcsJob"
-      SET "status" = 'PROCESSING',
-          "startedAt" = NOW(),
-          "attempts" = "attempts" + 1,
-          "updatedAt" = NOW()
-      WHERE "id" = (
-        SELECT "id"
-        FROM "IcsJob"
-        WHERE "status" = 'QUEUED'
-        ORDER BY "priority" DESC, "createdAt" ASC
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING "id", "photoId", "animalId", "requestedById", "status", "priority", "attempts", "createdAt"
-    `;
+    const cleanAnimalId = targetAnimalId?.trim() || null;
+    const claimed = cleanAnimalId
+      ? await this.prisma.$queryRaw<ClaimedIcsJobRow[]>`
+          UPDATE "IcsJob"
+          SET "status" = 'PROCESSING',
+              "startedAt" = NOW(),
+              "attempts" = "attempts" + 1,
+              "updatedAt" = NOW()
+          WHERE "id" = (
+            SELECT "id"
+            FROM "IcsJob"
+            WHERE "status" = 'QUEUED' AND "animalId" = ${cleanAnimalId}
+            ORDER BY "priority" DESC, "createdAt" ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+          )
+          RETURNING "id", "photoId", "animalId", "requestedById", "status", "priority", "attempts", "createdAt"
+        `
+      : await this.prisma.$queryRaw<ClaimedIcsJobRow[]>`
+          UPDATE "IcsJob"
+          SET "status" = 'PROCESSING',
+              "startedAt" = NOW(),
+              "attempts" = "attempts" + 1,
+              "updatedAt" = NOW()
+          WHERE "id" = (
+            SELECT "id"
+            FROM "IcsJob"
+            WHERE "status" = 'QUEUED'
+            ORDER BY "priority" DESC, "createdAt" ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+          )
+          RETURNING "id", "photoId", "animalId", "requestedById", "status", "priority", "attempts", "createdAt"
+        `;
+
+    const remainingWhere = cleanAnimalId
+      ? { animalId: cleanAnimalId, status: { in: ["QUEUED", "PROCESSING"] } }
+      : { status: { in: ["QUEUED", "PROCESSING"] } };
 
     const job = claimed?.[0];
     if (!job) {
       const remaining = await this.prisma.icsJob.count({
-        where: { status: { in: ["QUEUED", "PROCESSING"] } },
+        where: remainingWhere,
       });
       return {
         processed: false,
@@ -557,7 +579,7 @@ export class IcsQueueService {
         .catch(() => {});
 
       const remaining = await this.prisma.icsJob.count({
-        where: { status: { in: ["QUEUED", "PROCESSING"] } },
+        where: remainingWhere,
       });
 
       return {
@@ -585,7 +607,7 @@ export class IcsQueueService {
       ]).catch(() => {});
 
       const remaining = await this.prisma.icsJob.count({
-        where: { status: { in: ["QUEUED", "PROCESSING"] } },
+        where: remainingWhere,
       });
       return {
         processed: false,

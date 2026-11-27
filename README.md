@@ -46,3 +46,14 @@ npx prisma generate
 npx prisma migrate deploy
 npm run dev
 ```
+
+---
+
+## Melhorias para a Próxima Equipe (Roadmap / Handoff)
+
+Para evoluir a acurácia do escore corporal e sustentar crescimento em produção, recomenda-se seguir esta sequência técnica:
+
+1. **Utilizar o sistema de coleta desenvolvido (`CattleCapture`) para gerar um dataset próprio**: Aproveitar o fluxo de coleta com validação anatômica e exportação estruturada (`ZIP` + `metadata.csv` + `manifest.json`) para reunir amostras reais das condições locais de manejo.
+2. **Consultar especialista para realizar anotações do dataset**: Envolver um médico-veterinário ou zootecnista na revisão e rotulagem padronizada das capturas (escala ICS 1,0–5,0 e aptidão/estado corporal).
+3. **Separar a IA de ICS do backend principal (se necessário)**: Extrair a inferência pesada de ICS para um microserviço ou worker dedicado (ex.: container Python/ONNX com mais memória/GPU), mantendo a API REST NestJS leve e preservando o desacoplamento já existente via fila persistente `IcsJob`.
+4. **Adicionar a nova IA de ICS gerada com o dataset próprio no sistema**: Treinar a nova rede com o dataset anotado e plugar o modelo resultante no pipeline de inferência (`IcsService` / `IcsQueueService`), versionando via `aiModelVersion`.

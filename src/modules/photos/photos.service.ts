@@ -9,6 +9,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { CustodyService } from "../animals/custody.service";
 import type { TokenPayload } from "../auth/jwt.utils";
 import { AiVisionService } from "../vision/ai-vision.service";
+import { IcsQueueService } from "../vision/ics-queue.service";
 import { IcsService } from "../vision/ics.service";
 import { PhotoRecalibrationService } from "../vision/photo-recalibration.service";
 import { StorageService } from "../vision/storage.service";
@@ -21,6 +22,7 @@ export class PhotosService {
     private readonly aiVision: AiVisionService,
     private readonly storage: StorageService,
     private readonly icsService: IcsService,
+    private readonly icsQueue: IcsQueueService,
     private readonly photoRecalibration: PhotoRecalibrationService
   ) {}
 
@@ -191,57 +193,76 @@ export class PhotosService {
     const aiScore = hasValidatedClientScore
       ? Math.round(parsedClientScore * 10) / 10
       : (await this.aiVision.analyzeRearImage(optimizedBuffer)).score;
-    // O modelo YOLO26m de ICS (~78 MB) roda sob demanda via fila persistente para manter o upload ágil em campo.
-    const ics = this.icsService.buildPendingPlaceholder("NOT_REQUESTED");
 
-    const photo = await this.prisma.photo.create({
-      data: {
-        animalId,
-        filePath,
-        view,
-        score: aiScore,
-        icsStatus: ics.status,
-        icsScore: ics.score,
-        icsClassification: ics.classification,
-        slaughterReady: ics.slaughterReady,
-        slaughterStatus: ics.slaughterStatus,
-        slaughterReason: ics.slaughterReason,
-        morphologicalFeatures:
-          ics.morphologicalFeatures !== null
-            ? (ics.morphologicalFeatures as Prisma.InputJsonValue)
-            : Prisma.JsonNull,
-        contourPoints:
-          ics.contourPoints !== null
-            ? (ics.contourPoints as Prisma.InputJsonValue)
-            : Prisma.JsonNull,
-        aiModelVersion: ics.aiModelVersion,
-        evaluatedAt: ics.status === "CALCULATED" ? new Date(ics.estimatedAt) : null,
-      },
-      select: {
-        id: true,
-        animalId: true,
-        view: true,
-        score: true,
-        icsStatus: true,
-        icsScore: true,
-        icsClassification: true,
-        slaughterReady: true,
-        slaughterStatus: true,
-        slaughterReason: true,
-        morphologicalFeatures: true,
-        contourPoints: true,
-        aiModelVersion: true,
-        evaluatedAt: true,
-        createdAt: true,
-      },
+    // Garante existência da tabela de fila ICS (idempotente e cacheada por instância) e cria
+    // foto + job de avaliação automática na mesma transação para reduzir round-trips ao banco.
+    await this.icsQueue.ensureQueueTable();
+    const ics = this.icsService.buildPendingPlaceholder("QUEUED");
+    const priority = user.role === "ADMIN" ? 5 : 0;
+    const requestedById = Number(user.id) || null;
+
+    const { photo, icsJob } = await this.prisma.$transaction(async (tx) => {
+      const createdPhoto = await tx.photo.create({
+        data: {
+          animalId,
+          filePath,
+          view,
+          score: aiScore,
+          icsStatus: ics.status,
+          icsScore: ics.score,
+          icsClassification: ics.classification,
+          slaughterReady: ics.slaughterReady,
+          slaughterStatus: ics.slaughterStatus,
+          slaughterReason: ics.slaughterReason,
+          morphologicalFeatures:
+            ics.morphologicalFeatures !== null
+              ? (ics.morphologicalFeatures as Prisma.InputJsonValue)
+              : Prisma.JsonNull,
+          contourPoints:
+            ics.contourPoints !== null
+              ? (ics.contourPoints as Prisma.InputJsonValue)
+              : Prisma.JsonNull,
+          aiModelVersion: ics.aiModelVersion,
+          evaluatedAt: ics.status === "CALCULATED" ? new Date(ics.estimatedAt) : null,
+        },
+        select: {
+          id: true,
+          animalId: true,
+          view: true,
+          score: true,
+          icsStatus: true,
+          icsScore: true,
+          icsClassification: true,
+          slaughterReady: true,
+          slaughterStatus: true,
+          slaughterReason: true,
+          morphologicalFeatures: true,
+          contourPoints: true,
+          aiModelVersion: true,
+          evaluatedAt: true,
+          createdAt: true,
+        },
+      });
+
+      const createdJob = await tx.icsJob.create({
+        data: {
+          photoId: createdPhoto.id,
+          animalId,
+          requestedById,
+          status: "QUEUED",
+          priority,
+        },
+      });
+
+      await tx.animal
+        .update({
+          where: { id: animalId },
+          data: { updatedAt: new Date() },
+        })
+        .catch(() => {});
+
+      return { photo: createdPhoto, icsJob: createdJob };
     });
-
-    await this.prisma.animal
-      .update({
-        where: { id: animalId },
-        data: { updatedAt: new Date() },
-      })
-      .catch(() => {});
 
     const lowQuality = aiScore !== null && aiScore < 40.0;
 
@@ -251,6 +272,8 @@ export class PhotosService {
       score: aiScore,
       confidence: aiScore,
       ics,
+      icsQueued: true,
+      icsJobId: icsJob.id,
       lowQuality,
       storageType,
     };
